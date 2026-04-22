@@ -16,7 +16,9 @@ from ultralytics import YOLO
 # =========================
 # CONFIG
 # =========================
-MODEL_PATH = "best.pt"
+MODEL_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "../../models/best.pt")
+)
 CONF_THRESHOLD = 0.25
 
 
