@@ -160,5 +160,57 @@ def main():
         run_inference(args.model_path, args.test_dir)
 
 
+def run(dataset_path):
+    """Standard pipeline interface.
+    dataset_path: root dir with 'fire/' and 'non_fire_images/' sub-folders.
+    """
+    import numpy as np
+    from sklearn.metrics import (
+        accuracy_score, precision_score, recall_score, f1_score,
+        roc_auc_score, average_precision_score,
+    )
+
+    if not os.path.exists(dataset_path):
+        return {"model_name": "MobileNetV2-UAV", "error": f"Dataset not found: {dataset_path}", "metrics": None}
+
+    try:
+        train_gen, val_gen = prepare_data_generators(dataset_path)
+        model = build_model()
+        save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mobilenet_fire.h5')
+        train_model(model, train_gen, val_gen, epochs=30, save_path=save_path)
+
+        # Collect predictions on the full validation set
+        val_gen.reset()
+        y_score_raw = model.predict(val_gen, verbose=0).flatten()
+        y_true_raw  = val_gen.classes
+
+        # Determine which class index is 'fire'
+        fire_idx = val_gen.class_indices.get('fire', 0)
+        if fire_idx == 0:
+            # class 0 = fire => low score means fire in binary sigmoid output
+            y_true_bin   = (y_true_raw == 0).astype(int)
+            y_score_fire = 1.0 - y_score_raw
+        else:
+            y_true_bin   = (y_true_raw == fire_idx).astype(int)
+            y_score_fire = y_score_raw
+
+        y_pred   = (y_score_fire >= 0.5).astype(int)
+        has_both = len(np.unique(y_true_bin)) > 1
+
+        return {
+            "model_name": "MobileNetV2-UAV",
+            "metrics": {
+                "accuracy":  float(accuracy_score(y_true_bin, y_pred)),
+                "precision": float(precision_score(y_true_bin, y_pred, zero_division=0)),
+                "recall":    float(recall_score(y_true_bin, y_pred, zero_division=0)),
+                "f1":        float(f1_score(y_true_bin, y_pred, zero_division=0)),
+                "auc":       float(roc_auc_score(y_true_bin, y_score_fire))       if has_both else None,
+                "aupr":      float(average_precision_score(y_true_bin, y_score_fire)) if has_both else None,
+            },
+        }
+    except Exception as exc:
+        return {"model_name": "MobileNetV2-UAV", "error": str(exc), "metrics": None}
+
+
 if __name__ == "__main__":
     main()

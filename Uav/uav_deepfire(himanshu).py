@@ -260,5 +260,38 @@ def main():
     # simulate_uav_detection(vgg_model, 'dummy_path.jpg')
 
 
+def run(dataset_path):
+    """Standard pipeline interface. Reports VGG19-TL as primary model.
+    dataset_path: Mendeley-style dir with Testing/ and Training and Validation/ sub-folders.
+    """
+    from sklearn.metrics import roc_auc_score, average_precision_score
+
+    if not check_dataset_exists(dataset_path):
+        return {"model_name": "DeepFire-VGG19", "error": f"Dataset not found: {dataset_path}", "metrics": None}
+
+    try:
+        X_train, X_test, y_train, y_test = load_and_preprocess_data(dataset_path)
+        vgg_model, _ = build_and_train_vgg19(X_train, y_train, X_test, y_test)
+
+        vgg_probs = vgg_model.predict(X_test).flatten()
+        vgg_pred  = (vgg_probs >= 0.5).astype(int)
+
+        stats = evaluate_model('VGG19-TL', y_test, vgg_pred)
+
+        return {
+            "model_name": "DeepFire-VGG19",
+            "metrics": {
+                "accuracy":  float(stats['Accuracy']),
+                "precision": float(stats['Precision']),
+                "recall":    float(stats['Recall']),
+                "f1":        float(stats['F1']),
+                "auc":       float(roc_auc_score(y_test, vgg_probs)),
+                "aupr":      float(average_precision_score(y_test, vgg_probs)),
+            },
+        }
+    except Exception as exc:
+        return {"model_name": "DeepFire-VGG19", "error": str(exc), "metrics": None}
+
+
 if __name__ == '__main__':
     main()

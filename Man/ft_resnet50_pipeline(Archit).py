@@ -305,5 +305,70 @@ def main():
     except Exception as e:
         print(f"Pipeline encountered an error: {e}")
 
+def run(dataset_path):
+    """Standard pipeline interface.
+    dataset_path: root dir with train/ val/ test/ sub-folders (ImageFolder structure).
+    """
+    from sklearn.metrics import roc_auc_score, average_precision_score
+    import numpy as np
+
+    if not os.path.exists(dataset_path):
+        return {"model_name": "FT-ResNet50", "error": f"Dataset not found: {dataset_path}", "metrics": None}
+
+    try:
+        set_seed(42)
+        device = get_device()
+
+        train_loader, val_loader, test_loader, class_names = get_dataloaders(
+            dataset_path, batch_size=32
+        )
+        model = build_ft_resnet50(num_classes=len(class_names), pretrained=True).to(device)
+
+        config = {
+            'epochs': 40, 'lr': 0.001,
+            'beta1': 0.9, 'beta2': 0.999, 'eps': 1e-8,
+            'focal_alpha': 1.0, 'focal_gamma': 2.0, 'mixup_alpha': 0.5,
+            'save_path': os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      'ft_resnet50_best.pth'),
+        }
+        model = train_model(model, train_loader, val_loader, device, config)
+
+        # Collect logits for AUC/AUPR
+        model.eval()
+        all_probs, all_labels = [], []
+        with torch.no_grad():
+            for images, labels in test_loader:
+                logits = model(images.to(device))
+                probs  = torch.softmax(logits, dim=1)[:, 1]  # fire class probability
+                all_probs.extend(probs.cpu().numpy())
+                all_labels.extend(labels.numpy())
+
+        all_probs  = np.array(all_probs)
+        all_labels = np.array(all_labels)
+
+        # fire class index: ImageFolder sorts alphabetically; determine fire index
+        fire_idx = class_names.index('fire') if 'fire' in class_names else 1
+        # re-orient probabilities so they represent P(fire)
+        fire_probs = all_probs if fire_idx == 1 else (1.0 - all_probs)
+        y_true_bin = (all_labels == fire_idx).astype(int)
+
+        acc, pre, rec, _, f1, _ = test_model(model, test_loader, device, class_names)
+        has_both = len(np.unique(y_true_bin)) > 1
+
+        return {
+            "model_name": "FT-ResNet50",
+            "metrics": {
+                "accuracy":  float(acc),
+                "precision": float(pre),
+                "recall":    float(rec),
+                "f1":        float(f1),
+                "auc":       float(roc_auc_score(y_true_bin, fire_probs))           if has_both else None,
+                "aupr":      float(average_precision_score(y_true_bin, fire_probs)) if has_both else None,
+            },
+        }
+    except Exception as exc:
+        return {"model_name": "FT-ResNet50", "error": str(exc), "metrics": None}
+
+
 if __name__ == '__main__':
     main()

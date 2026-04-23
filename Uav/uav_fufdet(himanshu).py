@@ -711,10 +711,66 @@ def train_pipeline():
     metrics = evaluate_model(model, test_loader)
     print(metrics)
 
+def run(dataset_path):
+    """Standard pipeline interface for FuFDet.
+    dataset_path: root of the FLAME-2 dataset (containing '254p RGB Images/' etc.).
+    AP (Average Precision) is used as the AUPR proxy; it is also reported as AUC.
+    accuracy is N/A for this object-detection model.
+    """
+    global BASE, RGB_DIR
+
+    if dataset_path and os.path.exists(dataset_path):
+        BASE    = dataset_path
+        RGB_DIR = os.path.join(BASE, '254p RGB Images')
+
+    try:
+        setup_directories()
+        sort_dataset()
+        clean_dataset()
+        annotate_dataset()
+        augment_dataset()
+        split_dataset()
+
+        train_dir = os.path.join(SPLIT_DIR, 'train', 'images')
+        if not os.path.exists(train_dir):
+            return {"model_name": "FuFDet", "error": "Splits not found after preparation", "metrics": None}
+
+        train_pipeline()  # trains and saves best checkpoint
+
+        # Evaluate best checkpoint
+        test_ds     = FireDataset(os.path.join(SPLIT_DIR, 'test', 'images'),
+                                  os.path.join(SPLIT_DIR, 'test', 'labels'))
+        test_loader = torch.utils.data.DataLoader(test_ds, batch_size=16, shuffle=False, num_workers=2)
+        m = FuFDet(pretrained=False).to(device)
+        ckpt = os.path.join(CKPT_DIR, 'best_fufdet.pth')
+        if os.path.exists(ckpt):
+            m.load_state_dict(torch.load(ckpt, map_location=device))
+        det_metrics = evaluate_model(m, test_loader)
+
+        ap   = det_metrics['AP']        / 100.0
+        prec = det_metrics['Precision'] / 100.0
+        rec  = det_metrics['Recall']    / 100.0
+        f1   = det_metrics['F1']
+
+        return {
+            "model_name": "FuFDet",
+            "metrics": {
+                "accuracy":  None,   # object-detection model — no image-level accuracy
+                "precision": float(prec),
+                "recall":    float(rec),
+                "f1":        float(f1),
+                "auc":       float(ap),   # AP used as ROC-AUC proxy
+                "aupr":      float(ap),
+            },
+        }
+    except Exception as exc:
+        return {"model_name": "FuFDet", "error": str(exc), "metrics": None}
+
+
 if __name__ == '__main__':
     # Set this to true to run data preparing phase
     prepare_data = False
-    
+
     if prepare_data:
         setup_directories()
         sort_dataset()
@@ -722,10 +778,11 @@ if __name__ == '__main__':
         annotate_dataset()
         augment_dataset()
         split_dataset()
-        
+
     # Set this parameter to true if you are ready to train on a GPU env
     do_train = False
     if do_train:
         train_pipeline()
     else:
         print("Data preperation and training flags are set to False.")
+

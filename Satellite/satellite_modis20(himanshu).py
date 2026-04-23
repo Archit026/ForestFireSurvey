@@ -562,5 +562,51 @@ def main() -> None:
     run_pipeline(args)
 
 
+def run(dataset_path):
+    """Standard pipeline interface for MODIS satellite fire detection.
+    dataset_path: directory that contains the FIRMS CSV and HDF granule files.
+    This is a physics-based, pixel-level detection algorithm — no classification
+    probabilities exist, so accuracy/AUC/AUPR are returned as None.
+    """
+    search_roots = [dataset_path] if (dataset_path and os.path.exists(dataset_path)) else ["."]
+
+    try:
+        csv_path = find_firms_csv(search_roots)
+    except FileNotFoundError as exc:
+        return {"model_name": "MODIS-Satellite", "error": str(exc), "metrics": None}
+
+    try:
+        event    = select_best_event(csv_path=csv_path)
+        granules = compute_granules(event)
+        hdf_img1 = find_hdf_by_prefix(granules.file_img1_prefix, search_roots)
+        hdf_img2 = find_hdf_by_prefix(granules.file_img2_prefix, search_roots)
+
+        if hdf_img1 is None or hdf_img2 is None:
+            return {"model_name": "MODIS-Satellite",
+                    "error": "Required HDF granule files not found in dataset_path",
+                    "metrics": None}
+
+        t39_1, _, _, _                     = load_modis_bands(hdf_img1)
+        t39_2, t11_2, red_2, nir_2         = load_modis_bands(hdf_img2)
+        t39_1, t39_2, t11_2, red_2, nir_2  = harmonize_and_prepare(t39_1, t39_2, t11_2, red_2, nir_2)
+        fire_mask = detect_fires(t39_1, t39_2, t11_2, red_2, nir_2, nir_2, granules.is_daytime)
+
+        return {
+            "model_name": "MODIS-Satellite",
+            "note": f"Fire pixels detected: {int(np.sum(fire_mask))} "
+                    "(pixel-level algorithm — image-level GT unavailable)",
+            "metrics": {
+                "accuracy":  None,
+                "precision": None,
+                "recall":    None,
+                "f1":        None,
+                "auc":       None,
+                "aupr":      None,
+            },
+        }
+    except Exception as exc:
+        return {"model_name": "MODIS-Satellite", "error": str(exc), "metrics": None}
+
+
 if __name__ == "__main__":
     main()

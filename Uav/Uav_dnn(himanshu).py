@@ -206,5 +206,59 @@ def main():
     print("\nRunning test inference...")
     perform_inference(model_save_path, X_test[0:1])
 
+def run(dataset_path):
+    """Standard pipeline interface. dataset_path: Mendeley-style dir with Testing/ and Training and Validation/ sub-folders."""
+    from sklearn.metrics import roc_auc_score, average_precision_score
+    from tensorflow.keras.utils import to_categorical
+    from tensorflow.keras.models import load_model as _load_keras_model
+
+    if not os.path.exists(dataset_path):
+        return {"model_name": "UAV-DNN", "error": f"Dataset not found: {dataset_path}", "metrics": None}
+
+    images, labels = load_data(dataset_path)
+    if not images:
+        return {"model_name": "UAV-DNN", "error": "No images found", "metrics": None}
+
+    X_norm, y_aug = augment_and_normalize(images, labels)
+    y_cat = to_categorical(y_aug, num_classes=2)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_norm, y_cat, test_size=0.20, random_state=42, stratify=y_cat
+    )
+
+    model = build_model()
+    save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uav_dnn_best.keras')
+    train_model(model, X_train, y_train, X_test, y_test, epochs=150, batch_size=32, save_path=save_path)
+
+    best_model = _load_keras_model(save_path)
+    y_pred_proba = best_model.predict(X_test)
+    y_pred_cls   = np.argmax(y_pred_proba, axis=1)
+    y_true_cls   = np.argmax(y_test, axis=1)
+
+    tp = np.sum((y_pred_cls == 1) & (y_true_cls == 1))
+    tn = np.sum((y_pred_cls == 0) & (y_true_cls == 0))
+    fp = np.sum((y_pred_cls == 1) & (y_true_cls == 0))
+    fn = np.sum((y_pred_cls == 0) & (y_true_cls == 1))
+    total = tp + tn + fp + fn
+
+    accuracy  = (tp + tn) / total if total > 0 else 0.0
+    precision = tp / (tp + fp)   if (tp + fp) > 0 else 0.0
+    recall    = tp / (tp + fn)   if (tp + fn) > 0 else 0.0
+    f1        = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    auc_val   = roc_auc_score(y_true_cls, y_pred_proba[:, 1])
+    aupr_val  = average_precision_score(y_true_cls, y_pred_proba[:, 1])
+
+    return {
+        "model_name": "UAV-DNN",
+        "metrics": {
+            "accuracy":  float(accuracy),
+            "precision": float(precision),
+            "recall":    float(recall),
+            "f1":        float(f1),
+            "auc":       float(auc_val),
+            "aupr":      float(aupr_val),
+        },
+    }
+
+
 if __name__ == '__main__':
     main()

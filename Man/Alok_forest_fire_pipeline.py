@@ -726,5 +726,63 @@ def main():
     print("Pipeline complete ✓")
 
 
+def run(dataset_path):
+    """Standard pipeline interface.
+    dataset_path: root dir with 'fire/' and 'nofire/' sub-folders (64x64 images).
+    """
+    from pathlib import Path
+    from sklearn.metrics import (
+        accuracy_score, precision_score, recall_score, f1_score,
+        roc_auc_score, average_precision_score,
+    )
+    import numpy as np
+
+    base        = Path(dataset_path)
+    model_dir   = base / 'models'
+    results_dir = base / 'results'
+    model_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        X, y = load_dataset(str(base))
+        X_train, X_val, X_test, y_train, y_val, y_test = split_dataset(X, y)
+
+        # Stage 1: HOG + AdaBoost
+        clf_hog, scaler_hog, _ = train_hog_adaboost(
+            X_train, y_train, X_val, y_val, model_dir, results_dir
+        )
+        # Stage 2: CNN backbone + SVM
+        feature_model, _ = train_cnn(
+            X_train, y_train, X_val, y_val, model_dir, results_dir
+        )
+        svm, scaler_svm, _ = train_svm_on_features(
+            feature_model, X_train, y_train, X_val, y_val, model_dir, results_dir
+        )
+
+        # Two-stage prediction on test set
+        y_pred, _ = two_stage_predict(
+            X_test, clf_hog, scaler_hog, feature_model, svm, scaler_svm
+        )
+
+        # SVM probability scores for AUC / AUPR
+        feat_test = feature_model.predict(X_test, batch_size=64, verbose=0)
+        y_score   = svm.predict_proba(scaler_svm.transform(feat_test))[:, 1]
+        has_both  = len(np.unique(y_test)) > 1
+
+        return {
+            "model_name": "HOG-AdaBoost+CNN-SVM",
+            "metrics": {
+                "accuracy":  float(accuracy_score(y_test, y_pred)),
+                "precision": float(precision_score(y_test, y_pred, zero_division=0)),
+                "recall":    float(recall_score(y_test, y_pred, zero_division=0)),
+                "f1":        float(f1_score(y_test, y_pred, zero_division=0)),
+                "auc":       float(roc_auc_score(y_test, y_score))           if has_both else None,
+                "aupr":      float(average_precision_score(y_test, y_score)) if has_both else None,
+            },
+        }
+    except Exception as exc:
+        return {"model_name": "HOG-AdaBoost+CNN-SVM", "error": str(exc), "metrics": None}
+
+
 if __name__ == '__main__':
     main()

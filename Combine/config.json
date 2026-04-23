@@ -1,0 +1,17 @@
+{
+    "_comment": "Fill in the absolute paths for each dataset below, then run: python main.py --config config.json",
+
+    "uav_dataset":        "/path/to/mendeley_dataset",
+    "satellite_dataset":  "/path/to/modis_firms_data",
+    "man_dataset":        "/path/to/ground_camera_dataset",
+    "flame_dataset":      "/path/to/flame2_dataset",
+    "mobilenet_dataset":  "/path/to/mobilenet_fire_dataset",
+    "ft_resnet_dataset":  "/path/to/flame_train_val_test",
+    "ycbcr_dataset":      "/path/to/ycbcr_fire_dataset",
+    "cfyolo_dataset":     "/path/to/cfyolo_yolo_format_dataset",
+
+    "output_json": "results.json",
+
+    "_skip_comment": "Add module names below to exclude them from the run",
+    "skip": []
+}

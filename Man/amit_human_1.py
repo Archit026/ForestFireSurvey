@@ -159,12 +159,60 @@ def main():
     cv2.destroyAllWindows()
 
 
+def run(dataset_path):
+    """Standard pipeline interface.
+    dataset_path: root dir with 'fire/' and 'nofire/' sub-folders.
+    Requires pre-trained YOLOv8 weights at MODEL_PATH.
+    """
+    from sklearn.metrics import (
+        accuracy_score, precision_score, recall_score, f1_score,
+        roc_auc_score, average_precision_score,
+    )
+    import numpy as np
+
+    if not os.path.exists(MODEL_PATH):
+        return {"model_name": "YOLOv8-Man", "error": f"Model not found: {MODEL_PATH}", "metrics": None}
+
+    if not os.path.exists(dataset_path):
+        return {"model_name": "YOLOv8-Man", "error": f"Dataset not found: {dataset_path}", "metrics": None}
+
+    load_model()  # warm-up singleton
+
+    y_true, y_score = [], []
+    for label, folder in [(1, 'fire'), (0, 'nofire')]:
+        folder_path = os.path.join(dataset_path, folder)
+        if not os.path.exists(folder_path):
+            continue
+        for fname in sorted(os.listdir(folder_path)):
+            if not fname.lower().endswith(('.jpg', '.png', '.jpeg')):
+                continue
+            img = cv2.imread(os.path.join(folder_path, fname))
+            if img is None:
+                continue
+            result = predict(img)
+            y_true.append(label)
+            # score = confidence that image is fire
+            score = result['confidence'] if result['label'] == 'fire' else 0.0
+            y_score.append(float(score))
+
+    if not y_true:
+        return {"model_name": "YOLOv8-Man", "error": "No labelled images found", "metrics": None}
+
+    y_pred   = [1 if s >= CONF_THRESHOLD else 0 for s in y_score]
+    has_both = len(set(y_true)) > 1
+
+    return {
+        "model_name": "YOLOv8-Man",
+        "metrics": {
+            "accuracy":  float(accuracy_score(y_true, y_pred)),
+            "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+            "recall":    float(recall_score(y_true, y_pred, zero_division=0)),
+            "f1":        float(f1_score(y_true, y_pred, zero_division=0)),
+            "auc":       float(roc_auc_score(y_true, y_score))           if has_both else None,
+            "aupr":      float(average_precision_score(y_true, y_score)) if has_both else None,
+        },
+    }
+
+
 if __name__ == "__main__":
-    main()
-    
-    
-    
-    # Your teammates can now do
-    
-    # # from Man.amit_human_1 import predict
-    # # result = predict(image)
+    main()

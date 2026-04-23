@@ -459,5 +459,44 @@ def main():
         df.to_csv(output_file, index=False)
         print(f'Results saved -> {output_file}')
 
+def run(dataset_path):
+    """Standard pipeline interface.
+    dataset_path: root dir with 'fire/' and 'non_fire/' sub-folders of sequential images.
+    This is a traditional rule-based CV method; no probability scores exist,
+    so AUC and AUPR are returned as None.
+    """
+    if not os.path.exists(dataset_path):
+        return {"model_name": "YCbCr-FireDetection", "error": f"Dataset not found: {dataset_path}", "metrics": None}
+
+    try:
+        fire_paths     = collect_images(dataset_path, 'fire')
+        non_fire_paths = collect_images(dataset_path, 'non_fire')
+
+        if not fire_paths and not non_fire_paths:
+            return {"model_name": "YCbCr-FireDetection", "error": "No images found", "metrics": None}
+
+        fire_clips     = group_into_clips(fire_paths)
+        non_fire_clips = group_into_clips(non_fire_paths)
+
+        _, metrics = evaluate_dataset(fire_clips, non_fire_clips)
+
+        total = metrics['TP'] + metrics['TN'] + metrics['FP'] + metrics['FN']
+        acc   = (metrics['TP'] + metrics['TN']) / total if total > 0 else 0.0
+
+        return {
+            "model_name": "YCbCr-FireDetection",
+            "metrics": {
+                "accuracy":  float(acc),
+                "precision": float(metrics['precision']),
+                "recall":    float(metrics['recall']),
+                "f1":        float(metrics['f1']),
+                "auc":       None,   # rule-based method, no probability scores
+                "aupr":      None,
+            },
+        }
+    except Exception as exc:
+        return {"model_name": "YCbCr-FireDetection", "error": str(exc), "metrics": None}
+
+
 if __name__ == "__main__":
     main()
