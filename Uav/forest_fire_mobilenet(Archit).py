@@ -108,13 +108,15 @@ def train_model(model, train_loader, val_loader, epochs=30, save_path='./fire_mo
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3)
     best_acc, best_state = 0.0, None
     history = {'loss': [], 'val_loss': [], 'accuracy': [], 'val_accuracy': []}
+    log_every = max(1, len(train_loader) // 5)
 
     for epoch in range(1, epochs + 1):
         model.train()
         train_loss = 0.0
         train_ok = 0
         train_total = 0
-        for imgs, lbls in train_loader:
+        for batch_idx, (imgs, lbls) in enumerate(train_loader, start=1):
+            batch_t0 = time.time()
             imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
             optimizer.zero_grad()
             logits = model(imgs)
@@ -123,6 +125,14 @@ def train_model(model, train_loader, val_loader, epochs=30, save_path='./fire_mo
             train_loss += loss.item() * lbls.size(0)
             train_ok += (logits.argmax(1) == lbls).sum().item()
             train_total += lbls.size(0)
+            running_loss = train_loss / train_total if train_total else 0.0
+            running_acc = train_ok / train_total if train_total else 0.0
+            batch_time = time.time() - batch_t0
+            eta = batch_time * (len(train_loader) - batch_idx)
+            print(
+                f"  [Epoch {epoch}/{epochs}] batch {batch_idx}/{len(train_loader)} "
+                f"| batch_time={batch_time:.1f}s | eta={eta:.0f}s | train_loss={running_loss:.4f} | train_acc={running_acc:.4f}"
+            )
 
         # Validation
         model.eval(); correct = total = 0
@@ -171,15 +181,14 @@ def run_inference(model_path, test_dir):
 # =========================
 def main():
     parser = argparse.ArgumentParser(description="MobileNetV2 Forest Fire Detection (PyTorch)")
-    parser.add_argument('--dataset_dir', default='./dataset')
-    parser.add_argument('--test_dir',    default='./test_images')
+    default_root = Path(__file__).resolve().parents[1] / 'dataset' / 'uav' / 'FLAME'
+    parser.add_argument('--dataset_dir', default=str(default_root))
+    parser.add_argument('--test_dir',    default=str(default_root / 'Test'))
     parser.add_argument('--model_path',  default='./fire_model.pth')
     parser.add_argument('--epochs',      type=int, default=30)
     parser.add_argument('--batch_size',  type=int, default=32)
     parser.add_argument('--mode', choices=['train', 'infer', 'all'], default='all')
     args = parser.parse_args()
-
-    os.makedirs(args.dataset_dir, exist_ok=True); os.makedirs(args.test_dir, exist_ok=True)
 
     if args.mode in ['train', 'all']:
         train_ds = FireFolderDataset(args.dataset_dir, _get_transforms(True),  'train')
@@ -193,7 +202,7 @@ def main():
 
 
 def run(dataset_path, epochs=30, output_dir=None):
-    """Standard pipeline interface. dataset_path: dir with 'fire/' and 'non_fire_images/' sub-folders."""
+    """Standard pipeline interface. dataset_path: FLAME-style dir."""
     from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, average_precision_score
     if not os.path.exists(dataset_path):
         return {"model_name": "MobileNetV2-UAV", "error": f"Dataset not found: {dataset_path}", "metrics": None}

@@ -4,7 +4,7 @@ Converted from TensorFlow/Keras to PyTorch.
 Uses VGG19 Transfer Learning + traditional ML classifiers.
 """
 
-import os, cv2, numpy as np, pandas as pd, matplotlib.pyplot as plt, seaborn as sns
+import os, argparse, cv2, numpy as np, pandas as pd, matplotlib.pyplot as plt, seaborn as sns
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
@@ -152,7 +152,8 @@ def build_and_train_vgg19(X_train, y_train, X_test, y_test,
         train_loss = 0.0
         train_ok = 0
         train_total = 0
-        for imgs, lbls in train_loader:
+        for batch_idx, (imgs, lbls) in enumerate(train_loader, start=1):
+            batch_t0 = time.time()
             imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
             optimizer.zero_grad()
             logits = model(imgs)
@@ -162,6 +163,14 @@ def build_and_train_vgg19(X_train, y_train, X_test, y_test,
             train_loss += loss.item() * lbls.size(0)
             train_ok += ((torch.sigmoid(logits) >= 0.5).float() == lbls).sum().item()
             train_total += lbls.size(0)
+            running_loss = train_loss / train_total if train_total else 0.0
+            running_acc = train_ok / train_total if train_total else 0.0
+            batch_time = time.time() - batch_t0
+            eta = batch_time * (len(train_loader) - batch_idx)
+            print(
+                f"  [Epoch {ep}/{epochs}] batch {batch_idx}/{len(train_loader)} "
+                f"| batch_time={batch_time:.1f}s | eta={eta:.0f}s | train_loss={running_loss:.4f} | train_acc={running_acc:.4f}"
+            )
 
         model.eval()
         def _acc(loader):
@@ -250,10 +259,14 @@ def simulate_uav_detection(model, image_path, threshold=0.5):
 # MAIN
 # =========================
 def main():
-    data_dir = '/kaggle/input/datasets/himankag8/mendeley-dataset'
+    parser = argparse.ArgumentParser(description="DeepFire UAV Detection")
+    parser.add_argument('--dataset', default=str(Path(__file__).resolve().parents[1] / 'dataset' / 'uav' / 'FLAME'),
+                        help='Root FLAME dataset directory')
+    args = parser.parse_args()
+
+    data_dir = args.dataset
     if not check_dataset_exists(data_dir):
-        data_dir = 'mendeley_dataset'
-        if not os.path.exists(data_dir): return
+        return
 
     print("Loading and preprocessing data...")
     X_train, X_test, y_train, y_test = load_and_preprocess_data(data_dir)

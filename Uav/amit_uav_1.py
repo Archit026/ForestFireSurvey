@@ -1,21 +1,3 @@
-"""'''
-HOW TO RUN
------------
-    python fire_uav.py --dataset /path/to/dataset
-    python fire_uav.py --dataset /path/to/dataset --epochs 20 --batch_size 16
-    python fire_uav.py --dataset /path/to/dataset --no_train   # eval only (needs saved weights)
-
-OUTPUTS (saved in ./results/uav/)
-------------------------------------
-    fire_unet_classifier.pth    — best model weights
-    confusion_matrix.png        — visual confusion matrix
-    training_curves.png         — loss + metric curves across epochs
-    results_summary.txt         — final metrics in plain text
-"""
-
-# ============================================================
-# IMPORTS
-# ============================================================
 import os
 import sys
 import argparse
@@ -256,11 +238,12 @@ class FireUNetClassifier(nn.Module):
 # TRAINING
 # ============================================================
 
-def train_one_epoch(model, loader, optimizer, criterion, device):
+def train_one_epoch(model, loader, optimizer, criterion, device, epoch_idx=None, total_epochs=None):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
 
-    for imgs, labels in loader:
+    for batch_idx, (imgs, labels) in enumerate(loader, start=1):
+        batch_t0 = time.time()
         imgs   = imgs.to(device)
         labels = labels.float().unsqueeze(1).to(device)
 
@@ -274,6 +257,21 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
         preds       = (outputs > THRESHOLD).float()
         correct    += (preds == labels).sum().item()
         total      += imgs.size(0)
+
+        running_loss = total_loss / total if total else 0.0
+        running_acc = correct / total if total else 0.0
+        batch_time = time.time() - batch_t0
+        eta = batch_time * (len(loader) - batch_idx)
+        if epoch_idx is not None and total_epochs is not None:
+            print(
+                f"  [Epoch {epoch_idx}/{total_epochs}] batch {batch_idx}/{len(loader)} "
+                f"| batch_time={batch_time:.1f}s | eta={eta:.0f}s | train_loss={running_loss:.4f} | train_acc={running_acc:.4f}"
+            )
+        else:
+            print(
+                f"  batch {batch_idx}/{len(loader)} "
+                f"| batch_time={batch_time:.1f}s | eta={eta:.0f}s | train_loss={running_loss:.4f} | train_acc={running_acc:.4f}"
+            )
 
     return total_loss / total, correct / total
 
@@ -366,7 +364,7 @@ def train(model, train_loader, val_loader, save_dir, class_weights, device):
             phase = 2
 
         t0 = time.time()
-        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device)
+        train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch_idx=epoch, total_epochs=EPOCHS)
         val_metrics, _, _, _  = evaluate(model, val_loader, criterion, device)
 
         scheduler.step(val_metrics["f1"])

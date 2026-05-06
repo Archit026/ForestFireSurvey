@@ -4,7 +4,7 @@ Converted from TensorFlow/Keras to PyTorch.
 Replicates the custom CNN with Separable-Conv blocks, BN, Dropout.
 """
 
-import os, time, cv2, numpy as np, matplotlib.pyplot as plt, seaborn as sns
+import os, time, argparse, cv2, numpy as np, matplotlib.pyplot as plt, seaborn as sns
 from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import cohen_kappa_score, confusion_matrix, classification_report
@@ -20,7 +20,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # DATA LOADING
 # =========================
 def load_data(data_dir, img_size=(250, 250)):
-    """Loads images from FLAME or Mendeley-style split folders."""
+    """Loads images from FLAME-style split folders."""
     images, labels = [], []
 
     def load_specific(folder, label):
@@ -151,8 +151,9 @@ def train_model(model, X_train, y_train, X_test, y_test,
         train_loss = 0.0
         train_ok = 0
         train_total = 0
-        for imgs, lbls in train_loader:
+        for batch_idx, (imgs, lbls) in enumerate(train_loader, start=1):
             imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
+            batch_t0 = time.time()
             optimizer.zero_grad()
             logits = model(imgs)
             loss = criterion(logits, lbls)
@@ -161,6 +162,14 @@ def train_model(model, X_train, y_train, X_test, y_test,
             train_loss += loss.item() * lbls.size(0)
             train_ok += (logits.argmax(1) == lbls).sum().item()
             train_total += lbls.size(0)
+            running_loss = train_loss / train_total if train_total else 0.0
+            running_acc = train_ok / train_total if train_total else 0.0
+            batch_time = time.time() - batch_t0
+            eta = batch_time * (len(train_loader) - batch_idx)
+            print(
+                f"  [Epoch {ep}/{epochs}] batch {batch_idx}/{len(train_loader)} "
+                f"| batch_time={batch_time:.1f}s | eta={eta:.0f}s | train_loss={running_loss:.4f} | train_acc={running_acc:.4f}"
+            )
 
         # Val accuracy
         model.eval(); correct = total = 0
@@ -229,7 +238,12 @@ def perform_inference(model_path, sample_img):
 # MAIN
 # =========================
 def main():
-    data_dir = 'mendeley_dataset'
+    parser = argparse.ArgumentParser(description="UAV Fire Detection CNN (PyTorch)")
+    parser.add_argument('--dataset', default=str(Path(__file__).resolve().parents[1] / 'dataset' / 'uav' / 'FLAME'),
+                        help='Root FLAME dataset directory')
+    args = parser.parse_args()
+
+    data_dir = args.dataset
     if not os.path.exists(data_dir): print(f"Data directory '{data_dir}' not found."); return
     print("Loading data..."); images, labels = load_data(data_dir)
     if not images: print("No images found."); return
@@ -245,7 +259,7 @@ def main():
 
 
 def run(dataset_path, epochs=150, output_dir=None):
-    """Standard pipeline interface. dataset_path: Mendeley-style dir."""
+    """Standard pipeline interface. dataset_path: FLAME-style dir."""
     from sklearn.metrics import roc_auc_score, average_precision_score
     if not os.path.exists(dataset_path):
         return {"model_name": "UAV-DNN", "error": f"Dataset not found: {dataset_path}", "metrics": None}

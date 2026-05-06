@@ -7,3 +7,6 @@ __pycache__/
 
 dataset/
 .venv/
+.torch_cache
+results/
+.cache/
