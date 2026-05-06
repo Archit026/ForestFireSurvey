@@ -1,2 +1,12 @@
 *.h5
 *.pt
+
+__pycache__/
+*.pyc
+.matplotlib_cache/
+
+dataset/
+.venv/
+.torch_cache
+results/
+.cache/

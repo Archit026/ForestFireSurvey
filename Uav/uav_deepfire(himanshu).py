@@ -4,7 +4,9 @@ Converted from TensorFlow/Keras to PyTorch.
 Uses VGG19 Transfer Learning + traditional ML classifiers.
 """
 
-import os, cv2, numpy as np, pandas as pd, matplotlib.pyplot as plt, seaborn as sns
+import os, time, argparse, cv2, numpy as np, pandas as pd, matplotlib.pyplot as plt, seaborn as sns
+import time
+from pathlib import Path
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.naive_bayes import GaussianNB
@@ -18,6 +20,8 @@ import torch, torch.nn as nn, torch.optim as optim
 import torchvision.models as models
 import torchvision.transforms as T
 from torch.utils.data import DataLoader, TensorDataset
+
+from Uav.uav_common import model_results_dir, save_binary_confusion_matrix, save_binary_training_curves, save_results_summary
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -33,23 +37,42 @@ def check_dataset_exists(data_dir: str) -> bool:
 
 def load_and_preprocess_data(data_dir: str, img_size=(128, 128), test_size=0.2):
     """Load images with ROI crop, resize and train/test split."""
-    sub_dirs = ['Testing', 'Training and Validation']
-    classes  = {'fire': 1, 'nofire': 0}
     images, labels = [], []
 
-    for sub in sub_dirs:
-        for cls, label in classes.items():
-            folder = os.path.join(data_dir, sub, cls)
-            if not os.path.exists(folder): continue
-            for fname in os.listdir(folder):
-                path = os.path.join(folder, fname)
-                img  = cv2.imread(path)
-                if img is None: continue
-                h, w = img.shape[:2]
-                mh, mw = int(h*0.1), int(w*0.1)
-                img = img[mh:h-mh, mw:w-mw]
-                img = cv2.cvtColor(cv2.resize(img, img_size), cv2.COLOR_BGR2RGB)
-                images.append(img); labels.append(label)
+    def add_folder(folder: str, label: int):
+        if not os.path.exists(folder):
+            return
+        for fname in os.listdir(folder):
+            path = os.path.join(folder, fname)
+            img = cv2.imread(path)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            mh, mw = int(h * 0.1), int(w * 0.1)
+            img = img[mh:h - mh, mw:w - mw]
+            img = cv2.cvtColor(cv2.resize(img, img_size), cv2.COLOR_BGR2RGB)
+            images.append(img)
+            labels.append(label)
+
+    base_roots = [Path(data_dir)]
+    split_names = ['', 'Training', 'Train', 'Training and Validation', 'Testing', 'Test']
+    fire_names = ['fire', 'Fire']
+    nofire_names = ['nofire', 'No_Fire', 'NoFire', 'no_fire', 'non_fire', 'non_fire_images']
+    seen = set()
+
+    for base in base_roots:
+        if not base.exists():
+            continue
+        for split_name in split_names:
+            split_dir = base if split_name == '' else base / split_name
+            split_key = str(split_dir.resolve())
+            if split_key in seen or not split_dir.exists():
+                continue
+            seen.add(split_key)
+            for name in fire_names:
+                add_folder(str(split_dir / name), 1)
+            for name in nofire_names:
+                add_folder(str(split_dir / name), 0)
 
     X = np.array(images, dtype=np.float32) / 255.0
     y = np.array(labels)
@@ -110,7 +133,7 @@ def _np_to_tensor(X: np.ndarray) -> torch.Tensor:
 
 
 def build_and_train_vgg19(X_train, y_train, X_test, y_test,
-                           img_size=(128, 128), epochs=50, batch_size=64):
+                           img_size=(128, 128), epochs=50, batch_size=64, save_path='deepfire_vgg19.pth'):
     model = _VGG19FireModel(img_size).to(DEVICE)
     criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.SGD(
@@ -124,12 +147,31 @@ def build_and_train_vgg19(X_train, y_train, X_test, y_test,
     train_loader = DataLoader(TensorDataset(Xtr_t, ytr_t), batch_size, shuffle=True,  pin_memory=True)
     val_loader   = DataLoader(TensorDataset(Xte_t, yte_t), batch_size, shuffle=False, pin_memory=True)
 
-    history = {'accuracy': [], 'val_accuracy': []}
+    history = {'loss': [], 'val_loss': [], 'accuracy': [], 'val_accuracy': []}
     for ep in range(1, epochs + 1):
         model.train()
-        for imgs, lbls in train_loader:
+        train_loss = 0.0
+        train_ok = 0
+        train_total = 0
+        for batch_idx, (imgs, lbls) in enumerate(train_loader, start=1):
+            batch_t0 = time.time()
             imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
-            optimizer.zero_grad(); criterion(model(imgs), lbls).backward(); optimizer.step()
+            optimizer.zero_grad()
+            logits = model(imgs)
+            loss = criterion(logits, lbls)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * lbls.size(0)
+            train_ok += ((torch.sigmoid(logits) >= 0.5).float() == lbls).sum().item()
+            train_total += lbls.size(0)
+            running_loss = train_loss / train_total if train_total else 0.0
+            running_acc = train_ok / train_total if train_total else 0.0
+            batch_time = time.time() - batch_t0
+            eta = batch_time * (len(train_loader) - batch_idx)
+            print(
+                f"  [Epoch {ep}/{epochs}] batch {batch_idx}/{len(train_loader)} "
+                f"| batch_time={batch_time:.1f}s | eta={eta:.0f}s | train_loss={running_loss:.4f} | train_acc={running_acc:.4f}"
+            )
 
         model.eval()
         def _acc(loader):
@@ -140,12 +182,22 @@ def build_and_train_vgg19(X_train, y_train, X_test, y_test,
                     ok += (preds == lbls.to(DEVICE)).sum().item(); tot += lbls.size(0)
             return ok / tot if tot else 0.0
         tr_acc, vl_acc = _acc(train_loader), _acc(val_loader)
+        val_loss = 0.0
+        val_total = 0
+        with torch.no_grad():
+            for imgs, lbls in val_loader:
+                imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
+                logits = model(imgs)
+                val_loss += criterion(logits, lbls).item() * lbls.size(0)
+                val_total += lbls.size(0)
+        history['loss'].append(train_loss / train_total if train_total else 0.0)
+        history['val_loss'].append(val_loss / val_total if val_total else 0.0)
         history['accuracy'].append(tr_acc); history['val_accuracy'].append(vl_acc)
         if ep % 10 == 0:
             print(f"Epoch {ep}/{epochs}  train_acc={tr_acc:.4f}  val_acc={vl_acc:.4f}")
 
-    torch.save(model.state_dict(), 'deepfire_vgg19.pth')
-    print('Model saved to deepfire_vgg19.pth')
+    torch.save(model.state_dict(), save_path)
+    print(f'Model saved to {save_path}')
     return model, history
 
 
@@ -208,10 +260,14 @@ def simulate_uav_detection(model, image_path, threshold=0.5):
 # MAIN
 # =========================
 def main():
-    data_dir = '/kaggle/input/datasets/himankag8/mendeley-dataset'
+    parser = argparse.ArgumentParser(description="DeepFire UAV Detection")
+    parser.add_argument('--dataset', default=str(Path(__file__).resolve().parents[1] / 'dataset' / 'uav' / 'FLAME'),
+                        help='Root FLAME dataset directory')
+    args = parser.parse_args()
+
+    data_dir = args.dataset
     if not check_dataset_exists(data_dir):
-        data_dir = 'mendeley_dataset'
-        if not os.path.exists(data_dir): return
+        return
 
     print("Loading and preprocessing data...")
     X_train, X_test, y_train, y_test = load_and_preprocess_data(data_dir)
@@ -235,25 +291,32 @@ def main():
     generate_visualizations(y_test, ml_predictions, vgg_probs, vgg_history)
 
 
-def run(dataset_path, epochs=50):
+def run(dataset_path, epochs=50, output_dir=None):
     """Standard pipeline interface. Reports VGG19-TL as primary model."""
     from sklearn.metrics import roc_auc_score, average_precision_score
     if not check_dataset_exists(dataset_path):
         return {"model_name": "DeepFire-VGG19", "error": f"Dataset not found: {dataset_path}", "metrics": None}
     try:
         X_train, X_test, y_train, y_test = load_and_preprocess_data(dataset_path)
-        vgg_model, _ = build_and_train_vgg19(X_train, y_train, X_test, y_test, epochs=epochs)
+        save_dir = output_dir or str(model_results_dir('deepfire_vgg19'))
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, 'deepfire_vgg19.pth')
+        vgg_model, history = build_and_train_vgg19(X_train, y_train, X_test, y_test, epochs=epochs, save_path=save_path)
         vgg_probs = _get_vgg_probs(vgg_model, X_test)
         vgg_pred  = (vgg_probs >= 0.5).astype(int)
         stats = evaluate_model('VGG19-TL', y_test, vgg_pred)
-        return {"model_name": "DeepFire-VGG19", "metrics": {
+        metrics = {
             "accuracy":  float(stats['Accuracy']),
             "precision": float(stats['Precision']),
             "recall":    float(stats['Recall']),
             "f1":        float(stats['F1']),
-            "auc":       float(roc_auc_score(y_test, vgg_probs)),
-            "aupr":      float(average_precision_score(y_test, vgg_probs)),
-        }}
+            "auc":       float(roc_auc_score(y_test, vgg_probs)) if len(np.unique(y_test)) > 1 else None,
+            "aupr":      float(average_precision_score(y_test, vgg_probs)) if len(np.unique(y_test)) > 1 else None,
+        }
+        save_binary_training_curves(history, os.path.join(save_dir, 'training_curves.png'), 'DeepFire VGG19 Training History')
+        save_binary_confusion_matrix(y_test, vgg_pred, os.path.join(save_dir, 'confusion_matrix.png'), 'DeepFire VGG19 Confusion Matrix')
+        save_results_summary(os.path.join(save_dir, 'results_summary.txt'), 'DeepFire VGG19 Final Test Results', metrics)
+        return {"model_name": "DeepFire-VGG19", "metrics": metrics}
     except Exception as exc:
         return {"model_name": "DeepFire-VGG19", "error": str(exc), "metrics": None}
 

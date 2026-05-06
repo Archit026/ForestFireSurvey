@@ -1,35 +1,25 @@
 """
 main.py  —  Unified Forest Fire Model Comparison Pipeline
 ==========================================================
-Discovers and runs every model's run(dataset_path) across the
-Uav/, Satellite/, and Man/ folders, collects the standard metric
-dict, and prints a sorted comparison table.
+Discovers and runs every UAV model's run(dataset_path) across the
+Uav/ folder, collects the standard metric dict, and prints a sorted
+comparison table.
 
 Usage
 -----
     python main.py --config config.json
 
     # OR pass paths directly:
-    python main.py \\
-        --uav_dataset      /path/to/mendeley_dataset \\
-        --satellite_dataset /path/to/modis_data \\
-        --man_dataset       /path/to/human_camera_dataset \\
-        --flame_dataset     /path/to/flame2_dataset \\
-        --mobilenet_dataset /path/to/mobilenet_fire_dataset \\
-        --ft_resnet_dataset /path/to/flame_train_val_test \\
-        --ycbcr_dataset     /path/to/ycbcr_fire_dataset \\
-        --cfyolo_dataset    /path/to/cfyolo_dataset
+    python ./Combine/main.py --dataset ./dataset/uav/FLAME --epochs 3
+
+    # PowerShell multiline example:
+    python ./Combine/main.py `
+        --dataset ./dataset/uav/FLAME `
+        --epochs 3
 
 Config JSON format (alternative to CLI flags):
 {
-    "uav_dataset":       "...",
-    "satellite_dataset": "...",
-    "man_dataset":       "...",
-    "flame_dataset":     "...",
-    "mobilenet_dataset": "...",
-    "ft_resnet_dataset": "...",
-    "ycbcr_dataset":     "...",
-    "cfyolo_dataset":    "..."
+    "dataset": "..."
 }
 """
 
@@ -53,6 +43,8 @@ if hasattr(sys.stderr, "reconfigure"):
 # ---------------------------------------------------------------------------
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # ForestFireSurvey/
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 os.environ.setdefault("MPLCONFIGDIR", os.path.join(ROOT, ".matplotlib_cache"))
 os.environ.setdefault("TORCH_HOME", os.path.join(ROOT, ".torch_cache"))
 os.environ.setdefault("XDG_CACHE_HOME", os.path.join(ROOT, ".cache"))
@@ -114,80 +106,28 @@ def _build_registry(args) -> list:
         # ── UAV ──────────────────────────────────────────────────────────────
         (
             "uav",
-            "uav_dnn",
-            p("Uav", "Uav_dnn(himanshu).py"),
-            args.uav_dataset,          # Mendeley: Testing/ + Training and Validation/
+            "uav_fire_unet",
+            p("Uav", "amit_uav_1.py"),
+            args.dataset,
         ),
         (
             "uav",
-            "uav_unet",
-            p("Uav", "amit_uav_1.py"),
-            args.uav_dataset,          # expects fire/ nofire/ sub-dirs + pre-trained model
+            "uav_dnn",
+            p("Uav", "Uav_dnn(himanshu).py"),
+            args.dataset,
         ),
         (
             "uav",
             "mobilenet_uav",
             p("Uav", "forest_fire_mobilenet(Archit).py"),
-            args.mobilenet_dataset or args.uav_dataset,    # fire/ non_fire_images/ or Mendeley format
+            args.dataset,
         ),
-        (
-            "uav",
-            "deepfire_vgg19",
-            p("Uav", "uav_deepfire(himanshu).py"),
-            args.uav_dataset,          # Mendeley format
-        ),
-        (
-            "uav",
-            "fufdet",
-            p("Uav", "uav_fufdet(himanshu).py"),
-            args.flame_dataset or args.uav_dataset,        # FLAME-2 dataset root
-        ),
-
-        # ── Satellite ────────────────────────────────────────────────────────
-        (
-            "satellite",
-            "modis_satellite",
-            p("Satellite", "satellite_modis20(himanshu).py"),
-            args.satellite_dataset,    # dir with FIRMS CSV + HDF granules
-        ),
-
-        # ── Man (hand-held / ground-based) ───────────────────────────────────
-        (
-            "man",
-            "hog_cnn_svm",
-            p("Man", "Alok_forest_fire_pipeline.py"),
-            args.man_dataset,          # fire/ nofire/ (64×64 images)
-        ),
-        (
-            "man",
-            "yolov8_man",
-            p("Man", "amit_human_1.py"),
-            args.man_dataset,          # fire/ nofire/ + pre-trained best.pt
-        ),
-        (
-            "man",
-            "xception_man",
-            p("Man", "amit_human_2.py"),
-            args.man_dataset,          # fire/ nofire/ + pre-trained xception h5
-        ),
-        (
-            "man",
-            "cf_yolo",
-            p("Man", "cf_yolo_pipeline(Archit).py"),
-            args.cfyolo_dataset,       # images/{train,val,test}/ + labels/…
-        ),
-        (
-            "man",
-            "ycbcr_fire",
-            p("Man", "fire_detection_ycbcr(Archit).py"),
-            args.ycbcr_dataset or args.man_dataset,        # fire/ non_fire/ sequential images
-        ),
-        (
-            "man",
-            "ft_resnet50",
-            p("Man", "ft_resnet50_pipeline(Archit).py"),
-            args.ft_resnet_dataset,    # train/ val/ test/ (ImageFolder)
-        ),
+        # (
+        #     "uav",
+        #     "deepfire_vgg19",
+        #     p("Uav", "uav_deepfire(himanshu).py"),
+        #     args.dataset,
+        # ),
     ]
 
     # Filter out entries where the file doesn't exist (graceful skip)
@@ -276,34 +216,20 @@ def save_json(results: list, path: str):
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Forest Fire Unified Model Comparison Pipeline",
+        description="UAV Forest Fire Unified Model Comparison Pipeline",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     p.add_argument("--config", default=None,
                    help="Path to JSON config file with dataset paths.")
-    p.add_argument("--uav_dataset",       default=None,
-                   help="Mendeley-style dataset root (Testing/ + Training and Validation/).")
-    p.add_argument("--satellite_dataset", default=None,
-                   help="Directory with FIRMS CSV + MOD021KM HDF granules.")
-    p.add_argument("--man_dataset",       default=None,
-                   help="Ground-camera dataset root with fire/ and nofire/ sub-dirs.")
-    p.add_argument("--flame_dataset",     default=None,
-                   help="FLAME-2 dataset root for FuFDet (254p RGB Images/ etc.).")
-    p.add_argument("--mobilenet_dataset", default=None,
-                   help="Dataset root for MobileNetV2 with fire/ and non_fire_images/.")
-    p.add_argument("--ft_resnet_dataset", default=None,
-                   help="ImageFolder root with train/ val/ test/ for FT-ResNet50.")
-    p.add_argument("--ycbcr_dataset",     default=None,
-                   help="Sequential image root with fire/ and non_fire/ for YCbCr model.")
-    p.add_argument("--cfyolo_dataset",    default=None,
-                   help="YOLO-format dataset root for CF-YOLO.")
+    p.add_argument("--dataset", default=None,
+                   help="UAV FLAME dataset root (dataset/uav/FLAME).")
     p.add_argument("--output_json",       default="results.json",
                    help="Path to save full results JSON (default: results.json).")
     p.add_argument("--epochs",            type=int, default=None,
                    help="Override training epochs for model run() functions that support it.")
     p.add_argument("--sources",           nargs="*", default=None,
-                   choices=["uav", "man", "satellite"],
-                   help="Only run selected source groups, e.g. --sources man uav.")
+                   choices=["uav"],
+                   help="Only run selected source groups. UAV-only pipeline.")
     p.add_argument("--only",              nargs="*", default=None,
                    help="Only run these module names, e.g. --only hog_cnn_svm uav_dnn.")
     p.add_argument("--skip",              nargs="*", default=[],
@@ -319,6 +245,8 @@ def merge_config(args: argparse.Namespace) -> argparse.Namespace:
         for key, val in cfg.items():
             if getattr(args, key, None) is None:
                 setattr(args, key, val)
+    if getattr(args, "dataset", None) is None and getattr(args, "uav_dataset", None) is not None:
+        args.dataset = args.uav_dataset
     return args
 
 

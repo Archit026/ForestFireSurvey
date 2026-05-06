@@ -76,7 +76,54 @@ run(dataset_path: str) -> {
 
 ## How to Run
 
-**Option A — Config file (recommended):**
+## Local Setup
+
+From the project root (`ForestFireSurvey`), create and activate a virtual environment, then install the required packages:
+
+```bash
+python -m venv .venv
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+If you use Command Prompt instead of PowerShell, activate with:
+
+```bash
+.venv\Scripts\activate.bat
+```
+
+## Dataset Layout
+
+Place the UAV dataset in this exact location:
+
+```text
+ForestFireSurvey/
+  dataset/
+    uav/
+      FLAME/
+        Train/
+          Fire/
+          No_Fire/
+        Test/
+          Fire/
+          No_Fire/
+```
+
+Each `Train` and `Test` split must contain only the `Fire` and `No_Fire` folders shown above.
+
+## Run the Pipeline
+
+Run the unified pipeline from the project root:
+
+```bash
+python ./Combine/main.py --dataset ./dataset/uav/FLAME --epochs 3
+```
+
+**Option A — Config file (recommended for larger runs):**
 ```bash
 # 1. Edit Combine/config.json — fill in all dataset paths
 # 2. Run:

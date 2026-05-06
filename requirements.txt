@@ -1,0 +1,24 @@
+# CPU-only PyTorch index
+--index-url https://download.pytorch.org/whl/cpu
+
+# Core ML libraries
+numpy==1.26.4
+pandas==2.2.2
+scikit-learn==1.5.1
+
+# Deep learning
+torch==2.3.1
+torchvision==0.18.1
+
+# Image processing
+opencv-python-headless==4.10.0.84
+pillow==10.4.0
+albumentations==1.4.14
+
+# Visualization
+matplotlib==3.9.2
+seaborn==0.13.2
+
+# Utilities
+psutil
+PyYAML==6.0.3
