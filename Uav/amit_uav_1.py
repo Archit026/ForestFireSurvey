@@ -1,175 +1,125 @@
 """
-amit_uav_1.py
-----------------
-Fire Segmentation using UAV (U-Net .h5 model)
+amit_uav_1.py  —  Fire Segmentation using UAV U-Net (PyTorch)
+Converted from TensorFlow/Keras to PyTorch.
 """
 
-import os
-import cv2
-import numpy as np
-from tensorflow.keras.models import load_model
+import os, cv2, numpy as np
+import torch, torch.nn as nn, torch.nn.functional as F
+from PIL import Image as PILImage
 
-
-# =========================
-# CONFIG
-# =========================
-MODEL_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../models/fire_unet_final.h5")
-)
+MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../models/fire_unet_final.pth"))
 IMG_SIZE = 256
+DEVICE   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+_model   = None
 
-_model = None
+
+class _DoubleConv(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False), nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False), nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True),
+        )
+    def forward(self, x): return self.net(x)
 
 
-# =========================
-# LOAD MODEL
-# =========================
+class UNet(nn.Module):
+    def __init__(self, in_ch=3, out_ch=1, features=(64, 128, 256, 512)):
+        super().__init__()
+        self.encoders, self.pools, self.upconvs, self.decoders = nn.ModuleList(), nn.ModuleList(), nn.ModuleList(), nn.ModuleList()
+        ch = in_ch
+        for f in features:
+            self.encoders.append(_DoubleConv(ch, f)); self.pools.append(nn.MaxPool2d(2)); ch = f
+        self.bottleneck = _DoubleConv(ch, ch * 2); ch = ch * 2
+        for f in reversed(features):
+            self.upconvs.append(nn.ConvTranspose2d(ch, f, 2, stride=2))
+            self.decoders.append(_DoubleConv(f * 2, f)); ch = f
+        self.final_conv = nn.Conv2d(ch, out_ch, 1)
+
+    def forward(self, x):
+        skips = []
+        for enc, pool in zip(self.encoders, self.pools):
+            x = enc(x); skips.append(x); x = pool(x)
+        x = self.bottleneck(x)
+        for upconv, dec, skip in zip(self.upconvs, self.decoders, reversed(skips)):
+            x = upconv(x)
+            if x.shape != skip.shape: x = F.interpolate(x, size=skip.shape[2:])
+            x = dec(torch.cat([skip, x], dim=1))
+        return torch.sigmoid(self.final_conv(x))
+
+
 def load_uav_model():
     global _model
     if _model is None:
-        _model = load_model(MODEL_PATH)
-        print("✅ UAV U-Net model loaded")
+        _model = UNet().to(DEVICE)
+        if os.path.exists(MODEL_PATH):
+            _model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+            print("✅ UAV U-Net model loaded")
+        else:
+            print(f"⚠️  Weights not found at {MODEL_PATH}; using random init.")
+        _model.eval()
     return _model
 
 
-# =========================
-# PREPROCESS IMAGE
-# =========================
 def preprocess(image):
-    image_resized = cv2.resize(image, (IMG_SIZE, IMG_SIZE))
-    image_norm = image_resized / 255.0
-    return np.expand_dims(image_norm, axis=0)
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    t = torch.from_numpy(cv2.resize(rgb, (IMG_SIZE, IMG_SIZE)).astype(np.float32) / 255.0)
+    return t.permute(2, 0, 1).unsqueeze(0).to(DEVICE)
 
 
-# =========================
-# PREDICT FUNCTION (IMPORTANT)
-# =========================
 def predict(image):
-    """
-    Output:
-        {
-            "label": "fire" / "none",
-            "confidence": float,
-            "area": float
-        }
-    """
     model = load_uav_model()
-
-    input_img = preprocess(image)
-    pred_mask = model.predict(input_img)[0]
-
-    # Convert mask to binary
-    mask = (pred_mask > 0.5).astype(np.uint8)
-
-    fire_pixels = np.sum(mask)
-    total_pixels = mask.size
-
-    fire_ratio = fire_pixels / total_pixels
-
-    return {
-        "label": "fire" if fire_ratio > 0.01 else "none",
-        "confidence": float(np.max(pred_mask)),
-        "area": float(fire_ratio)
-    }
+    with torch.no_grad():
+        pred = model(preprocess(image))[0, 0].cpu().numpy()
+    mask       = (pred > 0.5).astype(np.uint8)
+    fire_ratio = mask.sum() / mask.size
+    return {"label": "fire" if fire_ratio > 0.01 else "none",
+            "confidence": float(pred.max()), "area": float(fire_ratio)}
 
 
-# =========================
-# VISUALIZATION
-# =========================
 def draw_mask(image):
     model = load_uav_model()
-
-    input_img = preprocess(image)
-    pred_mask = model.predict(input_img)[0]
-
-    mask = (pred_mask > 0.5).astype(np.uint8) * 255
-    mask = cv2.resize(mask, (image.shape[1], image.shape[0]))
-
-    colored_mask = np.zeros_like(image)
-    colored_mask[:, :, 2] = mask  # red overlay
-
-    overlay = cv2.addWeighted(image, 0.7, colored_mask, 0.3, 0)
-
-    return overlay
+    with torch.no_grad():
+        pred = model(preprocess(image))[0, 0].cpu().numpy()
+    mask = cv2.resize((pred > 0.5).astype(np.uint8) * 255, (image.shape[1], image.shape[0]))
+    colored = np.zeros_like(image); colored[:, :, 2] = mask
+    return cv2.addWeighted(image, 0.7, colored, 0.3, 0)
 
 
-# =========================
-# MAIN (TEST ONLY)
-# =========================
 def main():
-    test_image_path = "test.jpg"
-
-    if not os.path.exists(test_image_path):
-        print("⚠️ test.jpg not found")
-        return
-
-    image = cv2.imread(test_image_path)
-
-    result = predict(image)
-
-    print("\n🔥 UAV Prediction:")
-    print(result)
-
-    output = draw_mask(image)
-    cv2.imshow("UAV Fire Segmentation", output)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+    if not os.path.exists("test.jpg"): print("⚠️ test.jpg not found"); return
+    print("\n🔥 UAV Prediction:"); print(predict(cv2.imread("test.jpg")))
 
 
 def run(dataset_path):
-    """Standard pipeline interface.
-    dataset_path: root dir containing 'fire/' and 'nofire/' sub-folders.
-    Requires the pre-trained U-Net model at MODEL_PATH.
-    """
-    from sklearn.metrics import (
-        accuracy_score, precision_score, recall_score, f1_score,
-        roc_auc_score, average_precision_score,
-    )
-
+    """Standard pipeline interface. dataset_path: dir with 'fire/' and 'nofire/' sub-folders."""
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, average_precision_score
     if not os.path.exists(MODEL_PATH):
         return {"model_name": "UAV-UNet", "error": f"Model not found: {MODEL_PATH}", "metrics": None}
-
     if not os.path.exists(dataset_path):
         return {"model_name": "UAV-UNet", "error": f"Dataset not found: {dataset_path}", "metrics": None}
-
-    # Load model once
     load_uav_model()
-
     y_true, y_score = [], []
     for label, folder in [(1, 'fire'), (0, 'nofire')]:
-        folder_path = os.path.join(dataset_path, folder)
-        if not os.path.exists(folder_path):
-            continue
-        for fname in sorted(os.listdir(folder_path)):
-            if not fname.lower().endswith(('.jpg', '.png', '.jpeg')):
-                continue
-            img = cv2.imread(os.path.join(folder_path, fname))
-            if img is None:
-                continue
-            result = predict(img)
-            y_true.append(label)
-            # score = probability of fire
-            score = result['confidence'] if result['label'] == 'fire' else (1.0 - result['confidence'])
-            y_score.append(float(score))
-
-    if not y_true:
-        return {"model_name": "UAV-UNet", "error": "No labelled images found", "metrics": None}
-
-    y_pred = [1 if s >= 0.5 else 0 for s in y_score]
-    has_both = len(set(y_true)) > 1
-
-    return {
-        "model_name": "UAV-UNet",
-        "metrics": {
-            "accuracy":  float(accuracy_score(y_true, y_pred)),
-            "precision": float(precision_score(y_true, y_pred, zero_division=0)),
-            "recall":    float(recall_score(y_true, y_pred, zero_division=0)),
-            "f1":        float(f1_score(y_true, y_pred, zero_division=0)),
-            "auc":       float(roc_auc_score(y_true, y_score))  if has_both else None,
-            "aupr":      float(average_precision_score(y_true, y_score)) if has_both else None,
-        },
-    }
+        fp = os.path.join(dataset_path, folder)
+        if not os.path.exists(fp): continue
+        for fname in sorted(os.listdir(fp)):
+            if not fname.lower().endswith(('.jpg', '.png', '.jpeg')): continue
+            img = cv2.imread(os.path.join(fp, fname))
+            if img is None: continue
+            r = predict(img); y_true.append(label)
+            y_score.append(r['confidence'] if r['label'] == 'fire' else 1.0 - r['confidence'])
+    if not y_true: return {"model_name": "UAV-UNet", "error": "No labelled images found", "metrics": None}
+    y_pred = [1 if s >= 0.5 else 0 for s in y_score]; has_both = len(set(y_true)) > 1
+    return {"model_name": "UAV-UNet", "metrics": {
+        "accuracy":  float(accuracy_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+        "recall":    float(recall_score(y_true, y_pred, zero_division=0)),
+        "f1":        float(f1_score(y_true, y_pred, zero_division=0)),
+        "auc":       float(roc_auc_score(y_true, y_score))           if has_both else None,
+        "aupr":      float(average_precision_score(y_true, y_score)) if has_both else None,
+    }}
 
 
 if __name__ == "__main__":
-    main()
+    main()

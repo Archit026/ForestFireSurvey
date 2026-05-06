@@ -39,14 +39,26 @@ import json
 import time
 import argparse
 import importlib.util
+import inspect
 import traceback
 from typing import Optional, Dict, Any
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # ForestFireSurvey/
+os.environ.setdefault("MPLCONFIGDIR", os.path.join(ROOT, ".matplotlib_cache"))
+os.environ.setdefault("TORCH_HOME", os.path.join(ROOT, ".torch_cache"))
+os.environ.setdefault("XDG_CACHE_HOME", os.path.join(ROOT, ".cache"))
+os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+os.makedirs(os.environ["TORCH_HOME"], exist_ok=True)
+os.makedirs(os.environ["XDG_CACHE_HOME"], exist_ok=True)
 
 def _load_module(module_name: str, file_path: str):
     """Dynamically import a Python file as a module."""
@@ -57,7 +69,7 @@ def _load_module(module_name: str, file_path: str):
     return module
 
 
-def _safe_run(module_name: str, file_path: str, dataset_path: str) -> Dict[str, Any]:
+def _safe_run(module_name: str, file_path: str, dataset_path: str, epochs: Optional[int] = None) -> Dict[str, Any]:
     """Load a module and call its run(dataset_path), catching all errors."""
     print(f"\n{'='*60}")
     print(f"  Running: {module_name}")
@@ -66,8 +78,11 @@ def _safe_run(module_name: str, file_path: str, dataset_path: str) -> Dict[str, 
     print(f"{'='*60}")
     t0 = time.time()
     try:
-        mod    = _load_module(module_name, file_path)
-        result = mod.run(dataset_path)
+        mod = _load_module(module_name, file_path)
+        run_kwargs = {}
+        if epochs is not None and "epochs" in inspect.signature(mod.run).parameters:
+            run_kwargs["epochs"] = epochs
+        result = mod.run(dataset_path, **run_kwargs)
     except Exception:
         tb = traceback.format_exc()
         print(f"[ERROR] {module_name} raised an exception:\n{tb}")
@@ -113,7 +128,7 @@ def _build_registry(args) -> list:
             "uav",
             "mobilenet_uav",
             p("Uav", "forest_fire_mobilenet(Archit).py"),
-            args.mobilenet_dataset,    # fire/ non_fire_images/
+            args.mobilenet_dataset or args.uav_dataset,    # fire/ non_fire_images/ or Mendeley format
         ),
         (
             "uav",
@@ -125,7 +140,7 @@ def _build_registry(args) -> list:
             "uav",
             "fufdet",
             p("Uav", "uav_fufdet(himanshu).py"),
-            args.flame_dataset,        # FLAME-2 dataset root
+            args.flame_dataset or args.uav_dataset,        # FLAME-2 dataset root
         ),
 
         # ── Satellite ────────────────────────────────────────────────────────
@@ -165,7 +180,7 @@ def _build_registry(args) -> list:
             "man",
             "ycbcr_fire",
             p("Man", "fire_detection_ycbcr(Archit).py"),
-            args.ycbcr_dataset,        # fire/ non_fire/ sequential images
+            args.ycbcr_dataset or args.man_dataset,        # fire/ non_fire/ sequential images
         ),
         (
             "man",
@@ -178,6 +193,10 @@ def _build_registry(args) -> list:
     # Filter out entries where the file doesn't exist (graceful skip)
     valid = []
     for source, name, fpath, dpath in registry:
+        if args.sources and source not in set(args.sources):
+            continue
+        if args.only and name not in set(args.only):
+            continue
         if not os.path.isfile(fpath):
             print(f"[SKIP] File not found: {fpath}")
             continue
@@ -280,6 +299,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="YOLO-format dataset root for CF-YOLO.")
     p.add_argument("--output_json",       default="results.json",
                    help="Path to save full results JSON (default: results.json).")
+    p.add_argument("--epochs",            type=int, default=None,
+                   help="Override training epochs for model run() functions that support it.")
+    p.add_argument("--sources",           nargs="*", default=None,
+                   choices=["uav", "man", "satellite"],
+                   help="Only run selected source groups, e.g. --sources man uav.")
+    p.add_argument("--only",              nargs="*", default=None,
+                   help="Only run these module names, e.g. --only hog_cnn_svm uav_dnn.")
     p.add_argument("--skip",              nargs="*", default=[],
                    help="Module names to skip, e.g. --skip fufdet cf_yolo.")
     return p
@@ -306,6 +332,12 @@ def main():
     args   = merge_config(args)
 
     registry = _build_registry(args)
+    if args.sources:
+        wanted_sources = set(args.sources)
+        registry = [entry for entry in registry if entry[0] in wanted_sources]
+    if args.only:
+        wanted_modules = set(args.only)
+        registry = [entry for entry in registry if entry[1] in wanted_modules]
 
     if not registry:
         print("No models to run. Provide at least one dataset path.")
@@ -319,7 +351,7 @@ def main():
             print(f"[SKIP] {module_name} (--skip flag)")
             continue
 
-        result = _safe_run(module_name, file_path, dataset_path)
+        result = _safe_run(module_name, file_path, dataset_path, epochs=args.epochs)
         result["source"]     = source
         result["model_name"] = result.get("model_name", module_name)
         results.append(result)

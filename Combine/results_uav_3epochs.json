@@ -1,0 +1,50 @@
+[
+    {
+        "model_name":  "UAV-DNN",
+        "metrics":  {
+                        "accuracy":  0.975,
+                        "precision":  0.989159891598916,
+                        "recall":  0.9605263157894737,
+                        "f1":  0.9746328437917223,
+                        "auc":  0.9986842105263158,
+                        "aupr":  0.9986891665805067
+                    },
+        "source":  "uav"
+    },
+    {
+        "model_name":  "UAV-UNet",
+        "error":  "Model not found: C:\\Users\\shriv\\OneDrive\\Desktop\\Btp github\\models\\fire_unet_final.pth",
+        "metrics":  null,
+        "source":  "uav"
+    },
+    {
+        "model_name":  "MobileNetV2-UAV",
+        "metrics":  {
+                        "accuracy":  0.7657894736842106,
+                        "precision":  0.7439613526570048,
+                        "recall":  0.8105263157894737,
+                        "f1":  0.7758186397984886,
+                        "auc":  0.8563988919667589,
+                        "aupr":  0.8594695531395273
+                    },
+        "source":  "uav"
+    },
+    {
+        "model_name":  "DeepFire-VGG19",
+        "metrics":  {
+                        "accuracy":  0.5526315789473685,
+                        "precision":  1.0,
+                        "recall":  0.10526315789473684,
+                        "f1":  0.1904761904761905,
+                        "auc":  0.8057063711911358,
+                        "aupr":  0.8064986757384647
+                    },
+        "source":  "uav"
+    },
+    {
+        "model_name":  "fufdet",
+        "error":  "ModuleNotFoundError: No module named \u0027albumentations\u0027",
+        "metrics":  null,
+        "source":  "uav"
+    }
+]

@@ -31,7 +31,6 @@ import argparse
 import time
 from pathlib import Path
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'   # suppress verbose TF logs
 
 # ── Third-party ───────────────────────────────────────────────────────────────
 import numpy as np
@@ -50,8 +49,10 @@ from sklearn.metrics import (accuracy_score, classification_report,
                              confusion_matrix, ConfusionMatrixDisplay)
 from skimage.feature import hog
 
-import tensorflow as tf
-from tensorflow.keras import layers, Model, optimizers, callbacks
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -96,6 +97,8 @@ CNN_FEATURE_DIM = 1024
 SVM_KERNEL = 'rbf'
 SVM_C      = 1.0
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  1. DATA UTILITIES
@@ -139,6 +142,11 @@ def load_dataset(
     y : np.ndarray (N,)            int32  {0=nofire, 1=fire}
     """
     base_dir = Path(base_dir)
+    if nofire_subdir == 'nofire' and not (base_dir / nofire_subdir).exists():
+        for candidate in ('non_fire_images', 'non_fire', 'no_fire'):
+            if (base_dir / candidate).exists():
+                nofire_subdir = candidate
+                break
     print("=" * 55)
     print("Loading dataset …")
 
@@ -191,66 +199,93 @@ def split_dataset(X, y, val_size=0.15, test_size=0.15, random_state=42):
 #  2. GAN — DCGAN FOR DATA AUGMENTATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _build_generator(noise_dim: int = GAN_NOISE_DIM) -> Model:
-    """FC → reshape (4×4×256) → ConvTranspose stack → 64×64×3 tanh."""
-    inp = layers.Input(shape=(noise_dim,), name='noise')
-    x = layers.Dense(4 * 4 * 256, use_bias=False)(inp)
-    x = layers.BatchNormalization()(x)
-    x = layers.ReLU()(x)
-    x = layers.Reshape((4, 4, 256))(x)
-    for filters in (128, 64, 32):
-        x = layers.Conv2DTranspose(filters, 5, strides=2, padding='same', use_bias=False)(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.ReLU()(x)
-    out = layers.Conv2DTranspose(3, 5, strides=2, padding='same',
-                                 activation='tanh', name='generated_img')(x)
-    return Model(inp, out, name='Generator')
+class Generator(nn.Module):
+    """FC -> reshape (4x4x256) -> ConvTranspose stack -> 64x64x3 tanh."""
+    def __init__(self, noise_dim: int = GAN_NOISE_DIM):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(noise_dim, 4 * 4 * 256, bias=False),
+            nn.BatchNorm1d(4 * 4 * 256),
+            nn.ReLU(inplace=True),
+        )
+        self.deconv = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, 5, stride=2, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(128, 64, 5, stride=2, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(64, 32, 5, stride=2, padding=2, output_padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.ConvTranspose2d(32, 3, 5, stride=2, padding=2, output_padding=1),
+            nn.Tanh(),
+        )
+
+    def forward(self, z):
+        x = self.fc(z).view(z.size(0), 256, 4, 4)
+        return self.deconv(x)
 
 
-def _build_discriminator() -> Model:
+class Discriminator(nn.Module):
     """Standard DCGAN discriminator with Dropout(0.1)."""
-    inp = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image')
-    x = layers.Conv2D(64, 5, strides=2, padding='same')(inp)
-    x = layers.LeakyReLU(0.2)(x)
-    x = layers.Dropout(GAN_DROPOUT)(x)
-    for filters in (128, 256):
-        x = layers.Conv2D(filters, 5, strides=2, padding='same')(x)
-        x = layers.BatchNormalization()(x)
-        x = layers.LeakyReLU(0.2)(x)
-        x = layers.Dropout(GAN_DROPOUT)(x)
-    out = layers.Flatten()(x)
-    out = layers.Dense(1, activation='sigmoid', name='real_or_fake')(out)
-    return Model(inp, out, name='Discriminator')
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 64, 5, stride=2, padding=2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout2d(GAN_DROPOUT),
+            nn.Conv2d(64, 128, 5, stride=2, padding=2),
+            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout2d(GAN_DROPOUT),
+            nn.Conv2d(128, 256, 5, stride=2, padding=2),
+            nn.BatchNorm2d(256),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout2d(GAN_DROPOUT),
+            nn.Flatten(),
+            nn.Linear(8 * 8 * 256, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x):
+        return self.net(x)
 
 
-_cross_entropy = tf.keras.losses.BinaryCrossentropy()
+def _build_generator(noise_dim: int = GAN_NOISE_DIM) -> Generator:
+    return Generator(noise_dim).to(DEVICE)
 
 
-def _discriminator_loss(real_out, fake_out):
-    real_loss = _cross_entropy(tf.ones_like(real_out)  * 0.9, real_out)   # label smoothing
-    fake_loss = _cross_entropy(tf.zeros_like(fake_out) + 0.1, fake_out)
-    return real_loss + fake_loss
+def _build_discriminator() -> Discriminator:
+    return Discriminator().to(DEVICE)
 
 
-def _generator_loss(fake_out):
-    return _cross_entropy(tf.ones_like(fake_out), fake_out)
+_cross_entropy = nn.BCELoss()
 
 
 def _gan_train_step(real_images, generator, discriminator, g_opt, d_opt):
-    """Single eager training step (no @tf.function — Keras 3 Adam compatibility)."""
-    noise = tf.random.normal([tf.shape(real_images)[0], GAN_NOISE_DIM])
-    with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
-        fake_images = generator(noise, training=True)
-        real_out = discriminator(real_images, training=True)
-        fake_out = discriminator(fake_images, training=True)
-        g_loss = _generator_loss(fake_out)
-        d_loss = _discriminator_loss(real_out, fake_out)
-        d_real_loss = _cross_entropy(tf.ones_like(real_out)  * 0.9, real_out)
-        d_fake_loss = _cross_entropy(tf.zeros_like(fake_out) + 0.1, fake_out)
+    """Single PyTorch DCGAN training step."""
+    batch_size = real_images.size(0)
+    noise = torch.randn(batch_size, GAN_NOISE_DIM, device=DEVICE)
 
-    g_opt.apply_gradients(zip(gen_tape.gradient(g_loss,  generator.trainable_variables),     generator.trainable_variables))
-    d_opt.apply_gradients(zip(disc_tape.gradient(d_loss, discriminator.trainable_variables), discriminator.trainable_variables))
-    return g_loss, d_loss, d_real_loss, d_fake_loss
+    d_opt.zero_grad()
+    fake_images = generator(noise).detach()
+    real_out = discriminator(real_images)
+    fake_out = discriminator(fake_images)
+    d_real_loss = _cross_entropy(real_out, torch.full_like(real_out, 0.9))
+    d_fake_loss = _cross_entropy(fake_out, torch.full_like(fake_out, 0.1))
+    d_loss = d_real_loss + d_fake_loss
+    d_loss.backward()
+    d_opt.step()
+
+    g_opt.zero_grad()
+    fake_images = generator(noise)
+    fake_out = discriminator(fake_images)
+    g_loss = _cross_entropy(fake_out, torch.ones_like(fake_out))
+    g_loss.backward()
+    g_opt.step()
+
+    return g_loss.item(), d_loss.item(), d_real_loss.item(), d_fake_loss.item()
 
 
 def train_gan(
@@ -273,25 +308,27 @@ def train_gan(
     print(f"{'='*55}")
 
     imgs_scaled = (real_images * 2.0) - 1.0   # [0,1] → [-1,1] for tanh
-    dataset = (
-        tf.data.Dataset.from_tensor_slices(imgs_scaled)
-        .shuffle(len(imgs_scaled), reshuffle_each_iteration=True)
-        .batch(GAN_BATCH_SIZE, drop_remainder=True)
-        .prefetch(tf.data.AUTOTUNE)
+    tensor = torch.from_numpy(imgs_scaled.transpose(0, 3, 1, 2)).float()
+    dataset = DataLoader(
+        TensorDataset(tensor),
+        batch_size=GAN_BATCH_SIZE,
+        shuffle=True,
+        drop_last=True,
     )
 
     generator     = _build_generator()
     discriminator = _build_discriminator()
-    g_opt = optimizers.Adam(GAN_LR, beta_1=0.5)
-    d_opt = optimizers.Adam(GAN_LR, beta_1=0.5)
+    g_opt = torch.optim.Adam(generator.parameters(), lr=GAN_LR, betas=(0.5, 0.999))
+    d_opt = torch.optim.Adam(discriminator.parameters(), lr=GAN_LR, betas=(0.5, 0.999))
 
     history = {'g': [], 'd': [], 'd_real': [], 'd_fake': []}
     for epoch in range(1, epochs + 1):
         g_ls, d_ls, dr_ls, df_ls = [], [], [], []
-        for batch in dataset:
+        for (batch,) in dataset:
+            batch = batch.to(DEVICE)
             gl, dl, drl, dfl = _gan_train_step(batch, generator, discriminator, g_opt, d_opt)
-            g_ls.append(gl.numpy()); d_ls.append(dl.numpy())
-            dr_ls.append(drl.numpy()); df_ls.append(dfl.numpy())
+            g_ls.append(gl); d_ls.append(dl)
+            dr_ls.append(drl); df_ls.append(dfl)
 
         history['g'].append(np.mean(g_ls));      history['d'].append(np.mean(d_ls))
         history['d_real'].append(np.mean(dr_ls)); history['d_fake'].append(np.mean(df_ls))
@@ -303,8 +340,8 @@ def train_gan(
 
     # Save model
     model_dir.mkdir(parents=True, exist_ok=True)
-    generator.save(str(model_dir / f'gan_generator_{label_name}.h5'))
-    print(f"Generator saved → models/gan_generator_{label_name}.h5")
+    torch.save(generator.state_dict(), str(model_dir / f'gan_generator_{label_name}.pth'))
+    print(f"Generator saved -> models/gan_generator_{label_name}.pth")
 
     # Plot training curves
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -322,8 +359,10 @@ def train_gan(
 
     # Generate synthetic images
     save_dir.mkdir(parents=True, exist_ok=True)
-    noise = tf.random.normal([n_generate, GAN_NOISE_DIM])
-    generated = generator(noise, training=False).numpy()
+    generator.eval()
+    noise = torch.randn(n_generate, GAN_NOISE_DIM, device=DEVICE)
+    with torch.no_grad():
+        generated = generator(noise).cpu().numpy().transpose(0, 2, 3, 1)
     generated = ((generated + 1.0) / 2.0 * 255.0).clip(0, 255).astype(np.uint8)
     for i, img_arr in enumerate(generated):
         PILImage.fromarray(img_arr).save(str(save_dir / f'gen_{i:05d}.png'))
@@ -367,7 +406,6 @@ def train_hog_adaboost(X_train, y_train, X_val, y_val, model_dir: Path, results_
         estimator     = DecisionTreeClassifier(max_depth=1),
         n_estimators  = ADA_N_ESTIMATORS,
         learning_rate = ADA_LR,
-        algorithm     = 'SAMME',
         random_state  = 42,
     )
     print(f"Training AdaBoost (n_estimators={ADA_N_ESTIMATORS}) …")
@@ -410,25 +448,54 @@ def predict_hog(images: np.ndarray, clf, scaler) -> np.ndarray:
 #  4. CNN + SVM  (Stage 2 — high-precision confirmation)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_cnn_backbone():
-    """
-    CNN backbone (Fig. 6 of paper).
+class CNNBackbone(nn.Module):
+    """CNN backbone from the paper with a 1024-d feature layer."""
+    def __init__(self, feature_dim: int = CNN_FEATURE_DIM, dropout: float = CNN_DROPOUT):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, 64, kernel_size=5, padding=2),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Flatten(),
+        )
+        self.fc_features = nn.Sequential(
+            nn.Linear(64 * 16 * 16, feature_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+        )
+        self.softmax_head = nn.Linear(feature_dim, 2)
 
-    Returns
-    -------
-    full_model    : Keras Model — softmax head, used for pre-training
-    feature_model : Keras Model — outputs 1024-d feature vectors
-    """
-    inp = layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3), name='image_input')
-    x = layers.Conv2D(32, (5, 5), padding='same', activation='relu', name='conv1')(inp)
-    x = layers.MaxPooling2D((2, 2), name='pool1')(x)
-    x = layers.Conv2D(64, (5, 5), padding='same', activation='relu', name='conv2')(x)
-    x = layers.MaxPooling2D((2, 2), name='pool2')(x)
-    x = layers.Flatten(name='flatten')(x)
-    feats = layers.Dense(CNN_FEATURE_DIM, activation='relu', name='fc_features')(x)
-    feats = layers.Dropout(CNN_DROPOUT, name='dropout')(feats)
-    out   = layers.Dense(2,  activation='softmax', name='softmax_head')(feats)
-    return Model(inp, out, name='CNN_full'), Model(inp, feats, name='CNN_feature_extractor')
+    def forward(self, x, return_features: bool = False):
+        x = self.features(x)
+        feats = self.fc_features(x)
+        if return_features:
+            return feats
+        return self.softmax_head(feats)
+
+
+def _to_torch_images(images: np.ndarray) -> torch.Tensor:
+    """Convert NHWC float images to NCHW torch tensors."""
+    return torch.from_numpy(images.transpose(0, 3, 1, 2)).float()
+
+
+def build_cnn_backbone():
+    """Return the PyTorch CNN used for pre-training and feature extraction."""
+    return CNNBackbone().to(DEVICE)
+
+
+def extract_cnn_features(feature_model, images: np.ndarray, batch_size: int = 64) -> np.ndarray:
+    """Extract 1024-d CNN features from NHWC image arrays."""
+    feature_model.eval()
+    tensor = _to_torch_images(images)
+    loader = DataLoader(TensorDataset(tensor), batch_size=batch_size, shuffle=False)
+    feats = []
+    with torch.no_grad():
+        for (imgs,) in loader:
+            feats.append(feature_model(imgs.to(DEVICE), return_features=True).cpu().numpy())
+    return np.vstack(feats)
 
 
 def train_cnn(X_train, y_train, X_val, y_val, model_dir: Path, results_dir: Path, epochs=CNN_EPOCHS):
@@ -445,54 +512,100 @@ def train_cnn(X_train, y_train, X_val, y_val, model_dir: Path, results_dir: Path
     print("="*55)
     print(f"  Epochs={epochs}, Batch={CNN_BATCH_SIZE}, LR={CNN_INITIAL_LR}, Dropout={CNN_DROPOUT}")
 
-    full_model, _ = build_cnn_backbone()
-    full_model.compile(
-        optimizer = optimizers.Adam(learning_rate=CNN_INITIAL_LR),
-        loss      = 'sparse_categorical_crossentropy',
-        metrics   = ['accuracy'],
+    model = build_cnn_backbone()
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=CNN_INITIAL_LR)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=CNN_LR_DECAY, patience=30, min_lr=1e-6
     )
 
-    cb_list = [
-        callbacks.ReduceLROnPlateau(monitor='val_loss', factor=CNN_LR_DECAY,
-                                    patience=30, min_lr=1e-6, verbose=1),
-        callbacks.EarlyStopping(monitor='val_loss', patience=60,
-                                restore_best_weights=True, verbose=1),
-        callbacks.ModelCheckpoint(str(model_dir / 'cnn_best.h5'),
-                                  monitor='val_loss', save_best_only=True, verbose=0),
-    ]
+    X_tr = _to_torch_images(X_train)
+    y_tr = torch.from_numpy(y_train).long()
+    X_va = _to_torch_images(X_val)
+    y_va = torch.from_numpy(y_val).long()
+    train_loader = DataLoader(TensorDataset(X_tr, y_tr), batch_size=CNN_BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(TensorDataset(X_va, y_va), batch_size=CNN_BATCH_SIZE, shuffle=False)
 
-    history = full_model.fit(
-        X_train, y_train,
-        validation_data = (X_val, y_val),
-        epochs          = epochs,
-        batch_size      = CNN_BATCH_SIZE,
-        callbacks       = cb_list,
-        verbose         = 1,
-    )
+    history = {'loss': [], 'accuracy': [], 'val_loss': [], 'val_accuracy': []}
+    best_val_loss = float('inf')
+    best_state = None
+    patience = 60
+    stale_epochs = 0
 
-    # Rebuild feature extractor sharing trained weights
-    feature_model = Model(full_model.input,
-                          full_model.get_layer('dropout').output,
-                          name='CNN_feature_extractor')
+    for epoch in range(1, epochs + 1):
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
+        for imgs, labels in train_loader:
+            imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
+            optimizer.zero_grad()
+            logits = model(imgs)
+            loss = criterion(logits, labels)
+            loss.backward()
+            optimizer.step()
 
-    # Plot training curves
+            train_loss += loss.item() * labels.size(0)
+            train_correct += (logits.argmax(1) == labels).sum().item()
+            train_total += labels.size(0)
+
+        model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        with torch.no_grad():
+            for imgs, labels in val_loader:
+                imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
+                logits = model(imgs)
+                loss = criterion(logits, labels)
+                val_loss += loss.item() * labels.size(0)
+                val_correct += (logits.argmax(1) == labels).sum().item()
+                val_total += labels.size(0)
+
+        train_loss = train_loss / train_total if train_total else 0.0
+        train_acc = train_correct / train_total if train_total else 0.0
+        val_loss = val_loss / val_total if val_total else 0.0
+        val_acc = val_correct / val_total if val_total else 0.0
+        scheduler.step(val_loss)
+
+        history['loss'].append(train_loss)
+        history['accuracy'].append(train_acc)
+        history['val_loss'].append(val_loss)
+        history['val_accuracy'].append(val_acc)
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            torch.save(best_state, str(model_dir / 'cnn_best.pth'))
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+
+        if epoch == 1 or epoch % 10 == 0:
+            print(f"  Epoch {epoch:>3}/{epochs}  loss={train_loss:.4f}  acc={train_acc:.4f}  val_loss={val_loss:.4f}  val_acc={val_acc:.4f}")
+        if stale_epochs >= patience:
+            print(f"Early stopping at epoch {epoch}; best val_loss={best_val_loss:.4f}")
+            break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    torch.save(model.state_dict(), str(model_dir / 'cnn_backbone.pth'))
+
     for metric, title, fname in [
         ('loss',     'CNN Training Loss',     'cnn_loss.png'),
         ('accuracy', 'CNN Training Accuracy', 'cnn_accuracy.png'),
     ]:
         plt.figure(figsize=(8, 4))
-        plt.plot(history.history[metric],         label=f'Train {metric.capitalize()}')
-        plt.plot(history.history[f'val_{metric}'], label=f'Val   {metric.capitalize()}')
+        plt.plot(history[metric], label=f'Train {metric.capitalize()}')
+        plt.plot(history[f'val_{metric}'], label=f'Val   {metric.capitalize()}')
         plt.xlabel('Epoch'); plt.ylabel(metric.capitalize())
         plt.title(title); plt.legend(); plt.tight_layout()
         plt.savefig(str(results_dir / fname), dpi=150)
         plt.close()
-    print("Training curves saved → results/cnn_loss.png, cnn_accuracy.png")
+    print("Training curves saved -> results/cnn_loss.png, cnn_accuracy.png")
+    print("CNN backbone saved -> models/cnn_backbone.pth")
 
-    feature_model.save(str(model_dir / 'cnn_backbone.h5'))
-    print("CNN backbone saved → models/cnn_backbone.h5")
-
-    return feature_model, history
+    return model, history
 
 
 def train_svm_on_features(feature_model, X_train, y_train, X_val, y_val,
@@ -506,16 +619,16 @@ def train_svm_on_features(feature_model, X_train, y_train, X_val, y_val,
     print("Stage 2b: SVM on CNN features")
     print("="*55)
 
-    print("Extracting CNN features …")
-    feat_train = feature_model.predict(X_train, batch_size=64, verbose=0)
-    feat_val   = feature_model.predict(X_val,   batch_size=64, verbose=0)
+    print("Extracting CNN features ...")
+    feat_train = extract_cnn_features(feature_model, X_train, batch_size=64)
+    feat_val   = extract_cnn_features(feature_model, X_val,   batch_size=64)
     print(f"  Feature dim: {feat_train.shape[1]}")
 
     scaler     = StandardScaler()
     feat_train = scaler.fit_transform(feat_train)
     feat_val   = scaler.transform(feat_val)
 
-    print(f"Training SVM (kernel={SVM_KERNEL}, C={SVM_C}) …")
+    print(f"Training SVM (kernel={SVM_KERNEL}, C={SVM_C}) ...")
     svm = SVC(kernel=SVM_KERNEL, C=SVM_C, probability=True, random_state=42)
     svm.fit(feat_train, y_train)
 
@@ -527,32 +640,33 @@ def train_svm_on_features(feature_model, X_train, y_train, X_val, y_val,
     cm = confusion_matrix(y_val, y_pred)
     fig, ax = plt.subplots(figsize=(5, 4))
     ConfusionMatrixDisplay(cm, display_labels=['NoFire', 'Fire']).plot(ax=ax, colorbar=False, cmap='Oranges')
-    ax.set_title('CNN + SVM — Validation Confusion Matrix')
+    ax.set_title('CNN + SVM - Validation Confusion Matrix')
     plt.tight_layout()
     plt.savefig(str(results_dir / 'cnn_svm_cm.png'), dpi=150)
     plt.close()
 
     joblib.dump(svm,    str(model_dir / 'svm_model.pkl'))
     joblib.dump(scaler, str(model_dir / 'cnn_svm_scaler.pkl'))
-    print("SVM saved → models/svm_model.pkl")
+    print("SVM saved -> models/svm_model.pkl")
 
     return svm, scaler, {'accuracy': acc, 'report': report}
 
 
 def load_cnn_svm(model_dir):
-    """Load saved CNN backbone and SVM."""
+    """Load saved PyTorch CNN backbone and SVM."""
     model_dir = Path(model_dir)
-    feature_model = tf.keras.models.load_model(str(model_dir / 'cnn_backbone.h5'))
+    feature_model = build_cnn_backbone()
+    feature_model.load_state_dict(torch.load(str(model_dir / 'cnn_backbone.pth'), map_location=DEVICE))
+    feature_model.eval()
     svm    = joblib.load(str(model_dir / 'svm_model.pkl'))
     scaler = joblib.load(str(model_dir / 'cnn_svm_scaler.pkl'))
     return feature_model, svm, scaler
 
 
 def predict_cnn_svm(images: np.ndarray, feature_model, svm, scaler) -> np.ndarray:
-    """CNN+SVM inference → (N,) int {0=nofire, 1=fire}."""
-    feats = feature_model.predict(images, batch_size=32, verbose=0)
+    """CNN+SVM inference -> (N,) int {0=nofire, 1=fire}."""
+    feats = extract_cnn_features(feature_model, images, batch_size=32)
     return svm.predict(scaler.transform(feats))
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  5. TWO-STAGE INFERENCE PIPELINE
@@ -726,7 +840,7 @@ def main():
     print("Pipeline complete ✓")
 
 
-def run(dataset_path):
+def run(dataset_path, epochs=CNN_EPOCHS):
     """Standard pipeline interface.
     dataset_path: root dir with 'fire/' and 'nofire/' sub-folders (64x64 images).
     """
@@ -753,7 +867,7 @@ def run(dataset_path):
         )
         # Stage 2: CNN backbone + SVM
         feature_model, _ = train_cnn(
-            X_train, y_train, X_val, y_val, model_dir, results_dir
+            X_train, y_train, X_val, y_val, model_dir, results_dir, epochs=epochs
         )
         svm, scaler_svm, _ = train_svm_on_features(
             feature_model, X_train, y_train, X_val, y_val, model_dir, results_dir
@@ -765,7 +879,7 @@ def run(dataset_path):
         )
 
         # SVM probability scores for AUC / AUPR
-        feat_test = feature_model.predict(X_test, batch_size=64, verbose=0)
+        feat_test = extract_cnn_features(feature_model, X_test, batch_size=64)
         y_score   = svm.predict_proba(scaler_svm.transform(feat_test))[:, 1]
         has_both  = len(np.unique(y_test)) > 1
 

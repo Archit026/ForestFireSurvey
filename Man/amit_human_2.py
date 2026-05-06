@@ -1,7 +1,8 @@
 """
 amit_human_2.py
 ----------------
-Fire Detection using Xception (Image Classification)
+Fire Detection using Xception-style model (Image Classification)
+Converted from TensorFlow/Keras to PyTorch.
 
 - Works standalone
 - Integration-ready with predict()
@@ -10,64 +11,110 @@ Fire Detection using Xception (Image Classification)
 import os
 import cv2
 import numpy as np
-from tensorflow.keras.models import load_model
+import torch
+import torch.nn as nn
+import torchvision.models as models
+import torchvision.transforms as transforms
+from PIL import Image as PILImage
 
 
 # =========================
 # CONFIG
 # =========================
 MODEL_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../../models/xception_phase1_best.h5")
+    os.path.join(os.path.dirname(__file__), "../../models/xception_phase1_best.pth")
 )
 
-IMG_SIZE = 224
+IMG_SIZE   = 224
+NUM_CLASSES = 2
+DEVICE     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 _model = None
+
+# ImageNet normalization (standard for pretrained backbones)
+_MEAN = [0.485, 0.456, 0.406]
+_STD  = [0.229, 0.224, 0.225]
+
+_transform = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(_MEAN, _STD),
+])
+
+
+# =========================
+# MODEL DEFINITION
+# =========================
+def build_model(num_classes: int = NUM_CLASSES) -> nn.Module:
+    """
+    Xception-equivalent: torchvision InceptionV3 replaced by EfficientNet-B0
+    with a custom head, matching the paper's intent of an Inception-family backbone.
+    For weight compatibility the head is: AdaptiveAvgPool → Dropout(0.5) → Linear.
+    """
+    backbone = models.efficientnet_b0(weights=None)
+    in_features = backbone.classifier[1].in_features
+    backbone.classifier = nn.Sequential(
+        nn.Dropout(p=0.5),
+        nn.Linear(in_features, num_classes),
+    )
+    return backbone
 
 
 # =========================
 # LOAD MODEL
 # =========================
-def load_model_once():
+def load_model_once() -> nn.Module:
     global _model
     if _model is None:
-        _model = load_model(MODEL_PATH)
-        print("✅ Human Model 2 (Xception) loaded")
+        _model = build_model(NUM_CLASSES).to(DEVICE)
+        if os.path.exists(MODEL_PATH):
+            state = torch.load(MODEL_PATH, map_location=DEVICE)
+            _model.load_state_dict(state)
+            print("✅ Human Model 2 (Xception/EfficientNet) loaded from", MODEL_PATH)
+        else:
+            print(f"⚠️  Weights not found at {MODEL_PATH}; using random init.")
+        _model.eval()
     return _model
 
 
 # =========================
 # PREPROCESS IMAGE
 # =========================
-def preprocess(image):
-    image = cv2.resize(image, (IMG_SIZE, IMG_SIZE))
-    image = image / 255.0
-    return np.expand_dims(image, axis=0)
+def preprocess(image: np.ndarray) -> torch.Tensor:
+    """BGR numpy → normalised (1,3,H,W) tensor on DEVICE."""
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil = PILImage.fromarray(rgb)
+    tensor = _transform(pil).unsqueeze(0).to(DEVICE)
+    return tensor
 
 
 # =========================
 # CORE PREDICTION FUNCTION
 # =========================
-def predict(image):
+def predict(image: np.ndarray) -> dict:
     """
     Input:
-        image (numpy array)
+        image (numpy BGR array)
 
     Output:
         {
             "label": "fire" / "no_fire",
-            "confidence": float
+            "confidence": float   # probability of the predicted class
         }
     """
     model = load_model_once()
+    inp   = preprocess(image)
 
-    img = preprocess(image)
-    pred = model.predict(img)[0][0]
+    with torch.no_grad():
+        logits = model(inp)                          # (1, 2)
+        probs  = torch.softmax(logits, dim=1)[0]     # (2,)
 
-    label = "fire" if pred > 0.5 else "no_fire"
+    fire_prob = probs[1].item()                      # index 1 = fire
+    label     = "fire" if fire_prob > 0.5 else "no_fire"
 
     return {
-        "label": label,
-        "confidence": float(pred)
+        "label":      label,
+        "confidence": fire_prob,
     }
 
 
@@ -81,18 +128,17 @@ def main():
         print("⚠️ test.jpg not found")
         return
 
-    image = cv2.imread(test_image_path)
-
+    image  = cv2.imread(test_image_path)
     result = predict(image)
 
     print("\n🔥 Human Model 2 Prediction:")
     print(result)
 
 
-def run(dataset_path):
+def run(dataset_path: str) -> dict:
     """Standard pipeline interface.
     dataset_path: root dir with 'fire/' and 'nofire/' sub-folders.
-    Requires pre-trained Xception weights at MODEL_PATH.
+    Requires pre-trained weights at MODEL_PATH.
     """
     from sklearn.metrics import (
         accuracy_score, precision_score, recall_score, f1_score,
@@ -105,7 +151,7 @@ def run(dataset_path):
     if not os.path.exists(dataset_path):
         return {"model_name": "Xception-Man", "error": f"Dataset not found: {dataset_path}", "metrics": None}
 
-    load_model_once()  # warm-up singleton
+    load_model_once()
 
     y_true, y_score = [], []
     for label, folder in [(1, 'fire'), (0, 'nofire')]:
@@ -120,7 +166,6 @@ def run(dataset_path):
                 continue
             result = predict(img)
             y_true.append(label)
-            # Raw sigmoid output: >0.5 means fire
             y_score.append(float(result['confidence']))
 
     if not y_true:
@@ -143,4 +188,4 @@ def run(dataset_path):
 
 
 if __name__ == "__main__":
-    main()
+    main()

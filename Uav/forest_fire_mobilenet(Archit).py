@@ -1,213 +1,213 @@
-import os
-import cv2
-import numpy as np
-import argparse
+"""
+forest_fire_mobilenet(Archit).py  —  MobileNetV2 Forest Fire Detection (PyTorch)
+Converted from TensorFlow/Keras to PyTorch.
+"""
 
-try:
-    import tensorflow as tf
-    from tensorflow.keras.preprocessing.image import ImageDataGenerator
-    from tensorflow.keras.applications import MobileNetV2
-    from tensorflow.keras.layers import Dense, GlobalAveragePooling2D, Dropout
-    from tensorflow.keras.models import Model, load_model
-except ImportError:
-    print("Warning: TensorFlow is not installed. Please install it using 'pip install tensorflow'")
+import os, cv2, numpy as np, argparse
+import torch, torch.nn as nn, torchvision.models as models, torchvision.transforms as T
+from torch.utils.data import DataLoader, Dataset
+from PIL import Image as PILImage
 
-
-def setup_directories(dataset_dir='./dataset', test_dir='./test_images'):
-    """Create necessary directories if they don't exist."""
-    print("Setting up directories...")
-    os.makedirs(os.path.join(dataset_dir, 'fire'), exist_ok=True)
-    os.makedirs(os.path.join(dataset_dir, 'non_fire_images'), exist_ok=True)
-    os.makedirs(test_dir, exist_ok=True)
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+IMG_SIZE = (224, 224)
 
 
-def prepare_data_generators(dataset_dir, batch_size=32, img_size=(224, 224)):
-    """Prepare training and validation data generators with augmentation."""
-    print("Preparing data generators...")
-    train_datagen = ImageDataGenerator(
-        rescale=1./255,
-        validation_split=0.2,
-        rotation_range=20,
-        zoom_range=0.15,
-        width_shift_range=0.2,
-        height_shift_range=0.2,
-        horizontal_flip=True
+# =========================
+# DATASET
+# =========================
+class FireFolderDataset(Dataset):
+    """Loads images from dataset_dir/{fire,non_fire_images}/ folders."""
+    CLASSES = ['fire', 'non_fire_images']
+
+    def __init__(self, dataset_dir, transform=None, split='train', val_fraction=0.2):
+        self.transform = transform
+        self.samples   = []
+        rng = np.random.RandomState(42)
+        for cls_idx, cls_name in enumerate(self.CLASSES):
+            folder_names = [cls_name]
+            if cls_name == 'non_fire_images':
+                folder_names += ['nofire', 'non_fire', 'no_fire']
+            files = []
+            for folder_name in folder_names:
+                candidates = [
+                    os.path.join(dataset_dir, folder_name),
+                    os.path.join(dataset_dir, 'Testing', folder_name),
+                    os.path.join(dataset_dir, 'Training and Validation', folder_name),
+                ]
+                for folder in candidates:
+                    if os.path.exists(folder):
+                        files.extend(
+                            os.path.join(folder, f)
+                            for f in sorted(os.listdir(folder))
+                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))
+                        )
+            rng.shuffle(files)
+            n_val  = max(1, int(len(files) * val_fraction))
+            if split == 'train':
+                chosen = files[n_val:]
+            else:
+                chosen = files[:n_val]
+            for path in chosen:
+                self.samples.append((path, cls_idx))
+
+    def __len__(self):  return len(self.samples)
+
+    def __getitem__(self, idx):
+        path, label = self.samples[idx]
+        img = PILImage.open(path).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
+
+def _get_transforms(augment=True):
+    if augment:
+        return T.Compose([
+            T.Resize(IMG_SIZE), T.RandomHorizontalFlip(), T.RandomRotation(20),
+            T.ColorJitter(0.2, 0.2, 0.1), T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+    return T.Compose([
+        T.Resize(IMG_SIZE), T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+
+# =========================
+# MODEL
+# =========================
+def build_model(num_classes=2, freeze_base=True):
+    """MobileNetV2 with custom binary head."""
+    try:
+        model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT)
+    except Exception as exc:
+        print(f"Warning: pretrained MobileNetV2 weights unavailable ({exc}); using random init.")
+        model = models.mobilenet_v2(weights=None)
+    if freeze_base:
+        for p in model.features.parameters():
+            p.requires_grad = False
+    in_features = model.classifier[1].in_features
+    model.classifier = nn.Sequential(
+        nn.Dropout(0.25),
+        nn.Linear(in_features, num_classes),
     )
-
-    train_generator = train_datagen.flow_from_directory(
-        dataset_dir,
-        target_size=img_size,
-        batch_size=batch_size,
-        class_mode='binary',
-        subset='training'
-    )
-
-    val_generator = train_datagen.flow_from_directory(
-        dataset_dir,
-        target_size=img_size,
-        batch_size=batch_size,
-        class_mode='binary',
-        subset='validation'
-    )
-    
-    return train_generator, val_generator
+    return model.to(DEVICE)
 
 
-def build_model(input_shape=(224, 224, 3)):
-    """Build and compile the MobileNetV2 transfer learning model."""
-    print("Building the model...")
-    base_model = MobileNetV2(
-        weights='imagenet',
-        include_top=False,
-        input_shape=input_shape
-    )
+# =========================
+# TRAIN / EVAL
+# =========================
+def train_model(model, train_loader, val_loader, epochs=30, save_path='./fire_model.pth'):
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3)
+    best_acc, best_state = 0.0, None
 
-    # Freeze the base model
-    for layer in base_model.layers:
-        layer.trainable = False
+    for epoch in range(1, epochs + 1):
+        model.train()
+        for imgs, lbls in train_loader:
+            imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
+            optimizer.zero_grad()
+            loss = criterion(model(imgs), lbls)
+            loss.backward(); optimizer.step()
 
-    # Add custom head
-    x = base_model.output
-    x = GlobalAveragePooling2D()(x)
-    x = Dense(128, activation='relu')(x)
-    x = Dropout(0.25)(x)
-    output = Dense(1, activation='sigmoid')(x)
+        # Validation
+        model.eval(); correct = total = 0
+        with torch.no_grad():
+            for imgs, lbls in val_loader:
+                imgs, lbls = imgs.to(DEVICE), lbls.to(DEVICE)
+                preds = model(imgs).argmax(1)
+                correct += (preds == lbls).sum().item(); total += lbls.size(0)
+        acc = correct / total if total > 0 else 0
+        print(f"Epoch {epoch}/{epochs}  val_acc={acc:.4f}")
+        if acc > best_acc:
+            best_acc = acc; best_state = {k: v.clone() for k, v in model.state_dict().items()}
 
-    model = Model(inputs=base_model.input, outputs=output)
-
-    model.compile(
-        optimizer='adam',
-        loss='binary_crossentropy',
-        metrics=['accuracy']
-    )
+    if best_state:
+        model.load_state_dict(best_state)
+        torch.save(best_state, save_path)
+        print(f"Model saved to {save_path}")
     return model
 
 
-def train_model(model, train_generator, val_generator, epochs=30, save_path='./fire_model.h5'):
-    """Train the model and save it."""
-    print(f"\nStarting training for {epochs} epochs...")
-    history = model.fit(
-        train_generator,
-        validation_data=val_generator,
-        epochs=epochs
-    )
-    
-    model.save(save_path)
-    print(f"Model saved to {save_path}\n")
-    return history
+def run_inference(model_path, test_dir):
+    if not os.path.exists(model_path): print(f"Model not found at {model_path}"); return
+    model = build_model(2, freeze_base=False)
+    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    model.eval()
+    tf = _get_transforms(augment=False)
+    images = [f for f in os.listdir(test_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+    if not images: print("No images found in test folder."); return
+    path = os.path.join(test_dir, images[0])
+    img  = PILImage.open(path).convert('RGB')
+    with torch.no_grad():
+        pred = model(tf(img).unsqueeze(0).to(DEVICE))
+    cls = pred.argmax(1).item()
+    print(f"Prediction: {'FIRE 🔥' if cls == 0 else 'NON FIRE 🌲'}")
 
 
-def run_inference(model_path, test_dir, img_size=(224, 224)):
-    """Run inference on a single test image from the test directory."""
-    if not os.path.exists(model_path):
-        print(f"Error: Model not found at {model_path}. Please train the model first.")
-        return
-
-    print("Loading model for inference...")
-    model = load_model(model_path)
-    
-    if not os.path.exists(test_dir):
-        print(f"Error: Test directory '{test_dir}' not found.")
-        return
-
-    images = os.listdir(test_dir)
-    if not images:
-        print(f"No images found in test folder '{test_dir}'.")
-        return
-
-    # Use the first image for demonstration
-    test_image_path = os.path.join(test_dir, images[0])
-    print(f"Using image for prediction: {test_image_path}")
-
-    img = cv2.imread(test_image_path)
-    if img is None:
-        print("Error: Could not read image.")
-        return
-
-    img = cv2.resize(img, img_size)
-    img = img / 255.0
-    img = np.reshape(img, (1, img_size[0], img_size[1], 3))
-
-    pred = model.predict(img)[0][0]
-    print(f"Raw Prediction Value: {pred:.4f}")
-
-    # The notebook mapped pred < 0.5 to FIRE based on the binary class index mapping
-    if pred < 0.5:
-        print("Prediction: FIRE 🔥")
-    else:
-        print("Prediction: NON FIRE 🌲")
-
-
+# =========================
+# MAIN
+# =========================
 def main():
-    parser = argparse.ArgumentParser(description="MobileNetV2 Forest Fire Detection Pipeline")
-    parser.add_argument('--dataset_dir', type=str, default='./dataset', help="Path to the dataset directory")
-    parser.add_argument('--test_dir', type=str, default='./test_images', help="Path to the test images directory")
-    parser.add_argument('--model_path', type=str, default='./fire_model.h5', help="Path to save/load the model")
-    parser.add_argument('--batch_size', type=int, default=32, help="Batch size for training")
-    parser.add_argument('--epochs', type=int, default=30, help="Number of training epochs")
-    parser.add_argument('--mode', type=str, choices=['train', 'infer', 'all'], default='all', help="Execution mode")
-    
+    parser = argparse.ArgumentParser(description="MobileNetV2 Forest Fire Detection (PyTorch)")
+    parser.add_argument('--dataset_dir', default='./dataset')
+    parser.add_argument('--test_dir',    default='./test_images')
+    parser.add_argument('--model_path',  default='./fire_model.pth')
+    parser.add_argument('--epochs',      type=int, default=30)
+    parser.add_argument('--batch_size',  type=int, default=32)
+    parser.add_argument('--mode', choices=['train', 'infer', 'all'], default='all')
     args = parser.parse_args()
 
-    setup_directories(args.dataset_dir, args.test_dir)
+    os.makedirs(args.dataset_dir, exist_ok=True); os.makedirs(args.test_dir, exist_ok=True)
 
     if args.mode in ['train', 'all']:
-        train_gen, val_gen = prepare_data_generators(args.dataset_dir, args.batch_size)
-        model = build_model()
-        train_model(model, train_gen, val_gen, epochs=args.epochs, save_path=args.model_path)
+        train_ds = FireFolderDataset(args.dataset_dir, _get_transforms(True),  'train')
+        val_ds   = FireFolderDataset(args.dataset_dir, _get_transforms(False), 'val')
+        train_loader = DataLoader(train_ds, args.batch_size, shuffle=True,  num_workers=0)
+        val_loader   = DataLoader(val_ds,   args.batch_size, shuffle=False, num_workers=0)
+        model = build_model(); train_model(model, train_loader, val_loader, args.epochs, args.model_path)
 
     if args.mode in ['infer', 'all']:
         run_inference(args.model_path, args.test_dir)
 
 
-def run(dataset_path):
-    """Standard pipeline interface.
-    dataset_path: root dir with 'fire/' and 'non_fire_images/' sub-folders.
-    """
-    import numpy as np
-    from sklearn.metrics import (
-        accuracy_score, precision_score, recall_score, f1_score,
-        roc_auc_score, average_precision_score,
-    )
-
+def run(dataset_path, epochs=30):
+    """Standard pipeline interface. dataset_path: dir with 'fire/' and 'non_fire_images/' sub-folders."""
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, average_precision_score
     if not os.path.exists(dataset_path):
         return {"model_name": "MobileNetV2-UAV", "error": f"Dataset not found: {dataset_path}", "metrics": None}
-
     try:
-        train_gen, val_gen = prepare_data_generators(dataset_path)
+        train_ds = FireFolderDataset(dataset_path, _get_transforms(True),  'train')
+        val_ds   = FireFolderDataset(dataset_path, _get_transforms(False), 'val')
+        train_loader = DataLoader(train_ds, 32, shuffle=True,  num_workers=0)
+        val_loader   = DataLoader(val_ds,   32, shuffle=False, num_workers=0)
         model = build_model()
-        save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mobilenet_fire.h5')
-        train_model(model, train_gen, val_gen, epochs=30, save_path=save_path)
+        save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'mobilenet_fire.pth')
+        train_model(model, train_loader, val_loader, epochs, save_path)
 
-        # Collect predictions on the full validation set
-        val_gen.reset()
-        y_score_raw = model.predict(val_gen, verbose=0).flatten()
-        y_true_raw  = val_gen.classes
+        model.eval()
+        y_score_raw, y_true_raw = [], []
+        with torch.no_grad():
+            for imgs, lbls in val_loader:
+                probs = torch.softmax(model(imgs.to(DEVICE)), dim=1)[:, 0].cpu().numpy()
+                y_score_raw.extend(probs); y_true_raw.extend(lbls.numpy())
 
-        # Determine which class index is 'fire'
-        fire_idx = val_gen.class_indices.get('fire', 0)
-        if fire_idx == 0:
-            # class 0 = fire => low score means fire in binary sigmoid output
-            y_true_bin   = (y_true_raw == 0).astype(int)
-            y_score_fire = 1.0 - y_score_raw
-        else:
-            y_true_bin   = (y_true_raw == fire_idx).astype(int)
-            y_score_fire = y_score_raw
-
+        y_true_raw  = np.array(y_true_raw)
+        y_score_raw = np.array(y_score_raw)
+        # class 0 = fire in FireFolderDataset
+        y_true_bin   = (y_true_raw == 0).astype(int)
+        y_score_fire = y_score_raw
         y_pred   = (y_score_fire >= 0.5).astype(int)
         has_both = len(np.unique(y_true_bin)) > 1
 
-        return {
-            "model_name": "MobileNetV2-UAV",
-            "metrics": {
-                "accuracy":  float(accuracy_score(y_true_bin, y_pred)),
-                "precision": float(precision_score(y_true_bin, y_pred, zero_division=0)),
-                "recall":    float(recall_score(y_true_bin, y_pred, zero_division=0)),
-                "f1":        float(f1_score(y_true_bin, y_pred, zero_division=0)),
-                "auc":       float(roc_auc_score(y_true_bin, y_score_fire))       if has_both else None,
-                "aupr":      float(average_precision_score(y_true_bin, y_score_fire)) if has_both else None,
-            },
-        }
+        return {"model_name": "MobileNetV2-UAV", "metrics": {
+            "accuracy":  float(accuracy_score(y_true_bin, y_pred)),
+            "precision": float(precision_score(y_true_bin, y_pred, zero_division=0)),
+            "recall":    float(recall_score(y_true_bin, y_pred, zero_division=0)),
+            "f1":        float(f1_score(y_true_bin, y_pred, zero_division=0)),
+            "auc":       float(roc_auc_score(y_true_bin, y_score_fire))       if has_both else None,
+            "aupr":      float(average_precision_score(y_true_bin, y_score_fire)) if has_both else None,
+        }}
     except Exception as exc:
         return {"model_name": "MobileNetV2-UAV", "error": str(exc), "metrics": None}
 

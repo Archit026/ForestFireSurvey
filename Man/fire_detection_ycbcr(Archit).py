@@ -469,27 +469,40 @@ def run(dataset_path):
         return {"model_name": "YCbCr-FireDetection", "error": f"Dataset not found: {dataset_path}", "metrics": None}
 
     try:
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
         fire_paths     = collect_images(dataset_path, 'fire')
         non_fire_paths = collect_images(dataset_path, 'non_fire')
+        if not non_fire_paths:
+            non_fire_paths = collect_images(dataset_path, 'non_fire_images')
 
         if not fire_paths and not non_fire_paths:
             return {"model_name": "YCbCr-FireDetection", "error": "No images found", "metrics": None}
 
-        fire_clips     = group_into_clips(fire_paths)
-        non_fire_clips = group_into_clips(non_fire_paths)
+        y_true, y_pred = [], []
+        for label, paths in [(1, fire_paths), (0, non_fire_paths)]:
+            for path in paths:
+                bgr = cv2.imread(path)
+                if bgr is None:
+                    continue
+                if max(bgr.shape[:2]) > 256:
+                    scale = 256 / max(bgr.shape[:2])
+                    bgr = cv2.resize(bgr, None, fx=scale, fy=scale)
+                _, _, _, mask = segment_fire(bgr)
+                fire_ratio = np.count_nonzero(mask) / mask.size
+                y_true.append(label)
+                y_pred.append(1 if fire_ratio >= 0.02 else 0)
 
-        _, metrics = evaluate_dataset(fire_clips, non_fire_clips)
-
-        total = metrics['TP'] + metrics['TN'] + metrics['FP'] + metrics['FN']
-        acc   = (metrics['TP'] + metrics['TN']) / total if total > 0 else 0.0
+        if not y_true:
+            return {"model_name": "YCbCr-FireDetection", "error": "No readable images found", "metrics": None}
 
         return {
             "model_name": "YCbCr-FireDetection",
             "metrics": {
-                "accuracy":  float(acc),
-                "precision": float(metrics['precision']),
-                "recall":    float(metrics['recall']),
-                "f1":        float(metrics['f1']),
+                "accuracy":  float(accuracy_score(y_true, y_pred)),
+                "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+                "recall":    float(recall_score(y_true, y_pred, zero_division=0)),
+                "f1":        float(f1_score(y_true, y_pred, zero_division=0)),
                 "auc":       None,   # rule-based method, no probability scores
                 "aupr":      None,
             },
