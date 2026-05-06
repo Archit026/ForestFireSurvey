@@ -6,3 +6,4 @@ __pycache__/
 .matplotlib_cache/
 
 dataset/
+.venv/
